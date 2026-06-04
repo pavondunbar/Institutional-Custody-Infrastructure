@@ -308,6 +308,9 @@ docker compose up -d
 # Install dependencies
 npm install
 
+# Create the tradfi_web3 database in Postgres
+docker exec -it tradfi-web3-postgres-1 psql -U postgres -c "CREATE DATABASE tradfi_web3;"
+
 # Run database migrations (uses postgres/postgres admin credentials)
 npm run migrate
 
