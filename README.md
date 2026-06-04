@@ -314,6 +314,12 @@ psql -h localhost -U postgres -c "CREATE DATABASE tradfi_web3;"
 # Run database migrations (uses postgres/postgres admin credentials)
 npm run migrate
 
+# Fix outbox permissions (migration grants INSERT but relay needs UPDATE)
+psql -h localhost -U postgres -d tradfi_web3 -c "GRANT SELECT, UPDATE ON outbox TO ledger_writer;"
+
+# Start a local Ethereum node (choose one)
+anvil
+
 # Start the application
 npm run dev
 ```
@@ -467,4 +473,4 @@ This project is licensed under the MIT License.
 
 ---
 
-Built with ❤️ by [Pavon Dunbar](https://github.com/pavondunbar)
+Built with ❤ ️ by [Pavon Dunbar](https://github.com/pavondunbar)
