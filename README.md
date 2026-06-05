@@ -17,8 +17,10 @@ Enterprise-grade blockchain infrastructure layer providing a custody-grade doubl
 - [API Reference](#api-reference)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Testing](#testing)
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
+- [Failure Scenarios](#failure-scenarios)
 - [Production Warning](#production-warning)
 - [License](#license)
 
@@ -416,6 +418,33 @@ curl http://localhost:3000/api/v1/accounts/<account-id>/balance
 curl http://localhost:3000/api/v1/chain/state
 ```
 
+## Testing
+
+```bash
+# Run all tests
+npm test
+
+# Run with coverage
+npx jest --coverage
+```
+
+The test suite covers:
+
+- **Ledger service** — balanced posting with hash chain, unbalanced rejection, idempotency deduplication, hash chain continuity, journal reversal, balance reconstruction, and serialization failure (double-spend prevention)
+- **Wallet service** — wallet creation, transaction submission with atomic nonce allocation, inactive/missing wallet rejection, reorg handling, and concurrent nonce uniqueness
+
+Tests use mocked database and Redis layers, so they run without infrastructure dependencies.
+
+### Continuous Integration
+
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and PR to `main`:
+
+1. **Lint** — ESLint with TypeScript rules
+2. **Build** — Full TypeScript compilation
+3. **Test** — Jest test suite
+
+Matrix-tested on Node.js 20 and 22.
+
 ## Configuration
 
 All configuration is via environment variables:
@@ -452,13 +481,15 @@ src/
 │   │   └── 001_ledger_schema.sql          # Full Postgres schema with triggers
 │   ├── connection.ts                      # Pool + serializable transaction helper
 │   ├── migrate.ts                         # Migration runner
-│   └── ledger-service.ts                  # Double-entry posting engine
+│   ├── ledger-service.ts                  # Double-entry posting engine
+│   └── ledger-service.test.ts             # Ledger integration tests
 ├── cache/
 │   └── redis.ts                           # Balance cache, nonce mgr, rate limiter
 ├── messaging/
 │   └── outbox-relay.ts                    # Transactional outbox → Kafka publisher
 ├── wallet/
-│   └── wallet-service.ts                  # Wallet CRUD, tx pipeline, signing interface
+│   ├── wallet-service.ts                  # Wallet CRUD, tx pipeline, signing interface
+│   └── wallet-service.test.ts             # Wallet integration tests
 ├── indexer/
 │   └── block-indexer.ts                   # Block ingestion, event indexing, reorg detection
 ├── chain/
@@ -468,8 +499,74 @@ src/
 └── api/
     └── app.ts                             # REST API (ledger, wallets, chain, blocks, events)
 
+.github/workflows/ci.yml                   # CI pipeline (lint, build, test on Node 20/22)
 docker-compose.yml                         # Postgres 16, Redis 7, Kafka, Zookeeper
 ```
+
+## Failure Scenarios
+
+### Chain Reorganization (Reorg) Handling
+
+A reorg occurs when the Ethereum network discards previously-accepted blocks in favor of a longer chain. Without proper handling, transactions believed to be confirmed can silently disappear — causing phantom balances and fund loss.
+
+**How the system detects it:**
+
+```
+Block Indexer polls block N+1
+  → Fetches block.parentHash
+  → Compares against stored hash for block N
+  → MISMATCH detected → reorg triggered
+```
+
+**Recovery sequence:**
+
+```
+1. Identify fork point (walk back until parentHash matches)
+2. Mark all indexed_blocks at height ≥ fork as status = 'reorged'
+3. Mark all indexed_events from those blocks as invalidated
+4. WalletService.handleReorg(forkBlock, chain):
+   → UPDATE transactions_blockchain SET status = 'reorged'
+     WHERE block_number >= forkBlock AND status = 'confirmed'
+5. Emit 'reorg.detected' event to Kafka (alerting, downstream consumers)
+6. Re-index from fork point forward with correct chain
+```
+
+**Why this matters:** A naive system would show a user's deposit as "confirmed" after 3 blocks, then silently lose it during a 4-block reorg. This system requires 12 confirmations for finality and actively invalidates + re-processes affected state when reorgs occur.
+
+---
+
+### Double-Spend Prevention
+
+A double-spend occurs when two concurrent requests attempt to debit the same funds simultaneously. Without protection, both could succeed — creating money from nothing.
+
+**How the system prevents it:**
+
+```
+Transaction A (debit account X, $1000)   Transaction B (debit account X, $1000)
+         │                                          │
+         ▼                                          ▼
+  BEGIN SERIALIZABLE                         BEGIN SERIALIZABLE
+  SELECT ... FOR UPDATE (locks balance row)  SELECT ... FOR UPDATE (BLOCKED — waiting)
+  Validate sufficient balance ✓              ... waiting ...
+  INSERT ledger_entry                        ... waiting ...
+  UPDATE balance_cache                       ... waiting ...
+  COMMIT ✓                                   Lock acquired — but now:
+                                             Postgres detects serialization conflict
+                                             → ROLLBACK with error:
+                                             "could not serialize access due to
+                                              concurrent update"
+                                             → Client retries or rejects
+```
+
+**Three layers of protection:**
+
+| Layer | Mechanism | What it catches |
+|-------|-----------|-----------------|
+| 1. Application | `SUM(debits) == SUM(credits)` validation before DB call | Malformed requests |
+| 2. Database row lock | `SELECT ... FOR UPDATE` on `balance_cache` | Concurrent writes to same account |
+| 3. Serializable isolation | Postgres SSI conflict detection | Phantom reads and write skew across accounts |
+
+**Result:** It is physically impossible for two conflicting transactions to both commit. One will always fail with a serialization error, which the application surfaces as a 409 Conflict to the caller.
 
 ## Production Warning
 
