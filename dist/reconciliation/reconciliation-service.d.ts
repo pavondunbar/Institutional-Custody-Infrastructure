@@ -22,6 +22,15 @@ export declare class ReconciliationService {
         passed: boolean;
         brokenChains: number;
     }>;
+    /**
+     * Verify token holder balances match supply and ledger records.
+     * - Sum of holder balances == total_minted - total_burned
+     * - Each holder's balance matches ledger-derived balance
+     */
+    runTokenBalanceReconciliation(): Promise<{
+        passed: boolean;
+        discrepancies: number;
+    }>;
     private startRun;
     private completeRun;
 }

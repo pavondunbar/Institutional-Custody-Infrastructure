@@ -18,6 +18,8 @@ class ReconciliationService {
         this.jobs.push(new cron_1.CronJob('*/5 * * * *', () => { this.runBalanceReconciliation().catch(e => config_1.logger.error(e, 'Balance recon error')); }, null, true));
         // Hash chain verification every 15 minutes
         this.jobs.push(new cron_1.CronJob('*/15 * * * *', () => { this.runHashChainVerification().catch(e => config_1.logger.error(e, 'Hash chain recon error')); }, null, true));
+        // Token balance reconciliation every 10 minutes
+        this.jobs.push(new cron_1.CronJob('*/10 * * * *', () => { this.runTokenBalanceReconciliation().catch(e => config_1.logger.error(e, 'Token balance recon error')); }, null, true));
         config_1.logger.info('Reconciliation service started');
     }
     stop() {
@@ -76,6 +78,53 @@ class ReconciliationService {
         }
         await this.completeRun(runId, accounts.rows.length, brokenChains);
         return { passed: brokenChains === 0, brokenChains };
+    }
+    /**
+     * Verify token holder balances match supply and ledger records.
+     * - Sum of holder balances == total_minted - total_burned
+     * - Each holder's balance matches ledger-derived balance
+     */
+    async runTokenBalanceReconciliation() {
+        const runId = await this.startRun('token_balance');
+        const tokens = await connection_1.db.query(`SELECT id, symbol, total_minted, total_burned, treasury_account_id
+       FROM token_definitions WHERE status IN ('active', 'paused')`);
+        let discrepancies = 0;
+        let tokensChecked = 0;
+        for (const token of tokens.rows) {
+            tokensChecked++;
+            const expectedSupply = BigInt(token.total_minted) - BigInt(token.total_burned);
+            const holderSum = await connection_1.db.query(`SELECT COALESCE(SUM(balance), 0) as total
+         FROM token_holders
+         WHERE token_id = $1 AND status != 'removed'`, [token.id]);
+            const actualHolderTotal = BigInt(holderSum.rows[0].total);
+            if (actualHolderTotal !== expectedSupply) {
+                discrepancies++;
+                config_1.logger.error({
+                    tokenId: token.id,
+                    symbol: token.symbol,
+                    expectedSupply: expectedSupply.toString(),
+                    holderTotal: actualHolderTotal.toString(),
+                }, 'Token supply mismatch: holder balances != minted - burned');
+            }
+            const holders = await connection_1.db.query(`SELECT th.account_id, th.balance as holder_balance
+         FROM token_holders th
+         WHERE th.token_id = $1 AND th.status != 'removed' AND th.balance > 0`, [token.id]);
+            for (const holder of holders.rows) {
+                const ledgerBalance = await (0, ledger_service_1.reconstructBalance)(holder.account_id);
+                const holderBal = BigInt(holder.holder_balance);
+                if (ledgerBalance.balance !== holderBal) {
+                    discrepancies++;
+                    config_1.logger.error({
+                        tokenId: token.id,
+                        accountId: holder.account_id,
+                        holderBalance: holderBal.toString(),
+                        ledgerBalance: ledgerBalance.balance.toString(),
+                    }, 'Token holder balance does not match ledger');
+                }
+            }
+        }
+        await this.completeRun(runId, tokensChecked, discrepancies);
+        return { passed: discrepancies === 0, discrepancies };
     }
     async startRun(type) {
         const result = await connection_1.db.query(`INSERT INTO reconciliation_runs (run_type, status) VALUES ($1, 'running') RETURNING id`, [type]);

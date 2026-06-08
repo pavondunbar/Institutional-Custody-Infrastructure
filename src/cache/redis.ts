@@ -17,6 +17,11 @@ const KEYS = {
   rateLimit: (key: string) => `rl:${key}`,
   blockHeight: (chain: string) => `block:height:${chain}`,
   txStatus: (txHash: string) => `tx:status:${txHash}`,
+  tokenDef: (tokenId: string) => `token:def:${tokenId}`,
+  holderBalance: (tokenId: string, accountId: string) => `token:holder:${tokenId}:${accountId}`,
+  whitelist: (tokenId: string) => `token:whitelist:${tokenId}`,
+  tokenSupply: (tokenId: string) => `token:supply:${tokenId}`,
+  holderCount: (tokenId: string) => `token:holders:${tokenId}`,
 } as const;
 
 /**
@@ -101,5 +106,65 @@ export const txStatusCache = {
 
   async set(txHash: string, status: string, ttlSeconds = 300): Promise<void> {
     await redis.setex(KEYS.txStatus(txHash), ttlSeconds, status);
+  },
+};
+
+/**
+ * Token definition cache (read-through, 5-minute TTL).
+ */
+export const tokenCache = {
+  async get(tokenId: string): Promise<string | null> {
+    return redis.get(KEYS.tokenDef(tokenId));
+  },
+
+  async set(tokenId: string, data: string, ttlSeconds = 300): Promise<void> {
+    await redis.setex(KEYS.tokenDef(tokenId), ttlSeconds, data);
+  },
+
+  async invalidate(tokenId: string): Promise<void> {
+    await redis.del(KEYS.tokenDef(tokenId));
+  },
+};
+
+/**
+ * Whitelist cache per token (set of allowed addresses).
+ */
+export const whitelistCache = {
+  async getAll(tokenId: string): Promise<string[]> {
+    return redis.smembers(KEYS.whitelist(tokenId));
+  },
+
+  async isMember(tokenId: string, address: string): Promise<boolean> {
+    const result = await redis.sismember(KEYS.whitelist(tokenId), address);
+    return result === 1;
+  },
+
+  async add(tokenId: string, address: string): Promise<void> {
+    await redis.sadd(KEYS.whitelist(tokenId), address);
+  },
+
+  async remove(tokenId: string, address: string): Promise<void> {
+    await redis.srem(KEYS.whitelist(tokenId), address);
+  },
+
+  async invalidate(tokenId: string): Promise<void> {
+    await redis.del(KEYS.whitelist(tokenId));
+  },
+};
+
+/**
+ * Token supply cache (total_minted - total_burned).
+ */
+export const tokenSupplyCache = {
+  async get(tokenId: string): Promise<string | null> {
+    return redis.get(KEYS.tokenSupply(tokenId));
+  },
+
+  async set(tokenId: string, supply: bigint, ttlSeconds = 60): Promise<void> {
+    await redis.setex(KEYS.tokenSupply(tokenId), ttlSeconds, supply.toString());
+  },
+
+  async invalidate(tokenId: string): Promise<void> {
+    await redis.del(KEYS.tokenSupply(tokenId));
   },
 };

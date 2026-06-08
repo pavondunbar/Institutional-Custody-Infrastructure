@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.txStatusCache = exports.blockTracker = exports.rateLimiter = exports.nonceManager = exports.balanceCache = exports.redis = void 0;
+exports.tokenSupplyCache = exports.whitelistCache = exports.tokenCache = exports.txStatusCache = exports.blockTracker = exports.rateLimiter = exports.nonceManager = exports.balanceCache = exports.redis = void 0;
 const ioredis_1 = __importDefault(require("ioredis"));
 const config_1 = require("../config");
 exports.redis = new ioredis_1.default({
@@ -20,6 +20,11 @@ const KEYS = {
     rateLimit: (key) => `rl:${key}`,
     blockHeight: (chain) => `block:height:${chain}`,
     txStatus: (txHash) => `tx:status:${txHash}`,
+    tokenDef: (tokenId) => `token:def:${tokenId}`,
+    holderBalance: (tokenId, accountId) => `token:holder:${tokenId}:${accountId}`,
+    whitelist: (tokenId) => `token:whitelist:${tokenId}`,
+    tokenSupply: (tokenId) => `token:supply:${tokenId}`,
+    holderCount: (tokenId) => `token:holders:${tokenId}`,
 };
 /**
  * Balance cache in Redis (read-through cache backed by Postgres balance_cache table)
@@ -91,6 +96,55 @@ exports.txStatusCache = {
     },
     async set(txHash, status, ttlSeconds = 300) {
         await exports.redis.setex(KEYS.txStatus(txHash), ttlSeconds, status);
+    },
+};
+/**
+ * Token definition cache (read-through, 5-minute TTL).
+ */
+exports.tokenCache = {
+    async get(tokenId) {
+        return exports.redis.get(KEYS.tokenDef(tokenId));
+    },
+    async set(tokenId, data, ttlSeconds = 300) {
+        await exports.redis.setex(KEYS.tokenDef(tokenId), ttlSeconds, data);
+    },
+    async invalidate(tokenId) {
+        await exports.redis.del(KEYS.tokenDef(tokenId));
+    },
+};
+/**
+ * Whitelist cache per token (set of allowed addresses).
+ */
+exports.whitelistCache = {
+    async getAll(tokenId) {
+        return exports.redis.smembers(KEYS.whitelist(tokenId));
+    },
+    async isMember(tokenId, address) {
+        const result = await exports.redis.sismember(KEYS.whitelist(tokenId), address);
+        return result === 1;
+    },
+    async add(tokenId, address) {
+        await exports.redis.sadd(KEYS.whitelist(tokenId), address);
+    },
+    async remove(tokenId, address) {
+        await exports.redis.srem(KEYS.whitelist(tokenId), address);
+    },
+    async invalidate(tokenId) {
+        await exports.redis.del(KEYS.whitelist(tokenId));
+    },
+};
+/**
+ * Token supply cache (total_minted - total_burned).
+ */
+exports.tokenSupplyCache = {
+    async get(tokenId) {
+        return exports.redis.get(KEYS.tokenSupply(tokenId));
+    },
+    async set(tokenId, supply, ttlSeconds = 60) {
+        await exports.redis.setex(KEYS.tokenSupply(tokenId), ttlSeconds, supply.toString());
+    },
+    async invalidate(tokenId) {
+        await exports.redis.del(KEYS.tokenSupply(tokenId));
     },
 };
 //# sourceMappingURL=redis.js.map

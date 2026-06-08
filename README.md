@@ -3,15 +3,15 @@
 > **SANDBOX / EDUCATIONAL USE ONLY — NOT FOR PRODUCTION**
 > This codebase is a reference implementation designed for learning, prototyping, and architectural exploration. It is **not audited, not legally reviewed, and must not be used to custody real funds, manage real private keys, or process real financial transactions.** See the [Production Warning](#production-warning) section for full details.
 
-Enterprise-grade blockchain infrastructure layer providing a custody-grade double-entry ledger (append-only, hash-chained, serializable isolation), Ethereum L1 integration (block indexing, reorg detection, finality tracking), wallet management with HSM/MPC signing pipelines, and event-driven architecture via transactional outbox → Kafka. All financial operations enforce ACID guarantees with database-level immutability triggers, cryptographic audit trails, and automated reconciliation.
+Enterprise-grade blockchain infrastructure layer providing a custody-grade double-entry ledger (append-only, hash-chained, serializable isolation), Ethereum L1 integration (block indexing, reorg detection, finality tracking), wallet management with HSM/MPC signing pipelines, event-driven architecture via transactional outbox → Kafka with dead-letter queues, institutional controls (IAM, governance, compliance, risk management), settlement & clearing (DvP/PvP/netting), lending/margin/liquidation engine, FX conversion, price oracle, treasury management, and comprehensive monitoring with Prometheus metrics export. All financial operations enforce ACID guarantees with database-level immutability triggers, DB-enforced state machine transitions, cryptographic audit trails, and automated reconciliation.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [What This Does](#what-this-does)
-- [Who This Benefits](#who-this-benefits)
 - [Architecture](#architecture)
 - [Core Components](#core-components)
+- [Institutional Controls](#institutional-controls)
 - [Ledger Guarantees](#ledger-guarantees)
 - [Database Schema](#database-schema)
 - [API Reference](#api-reference)
@@ -29,446 +29,498 @@ Enterprise-grade blockchain infrastructure layer providing a custody-grade doubl
 | Component | Detail |
 |-----------|--------|
 | Language | TypeScript (strict mode) |
-| Database | PostgreSQL 16 (append-only ledger, serializable isolation) |
-| Cache | Redis 7 (balance cache, nonce management, rate limiting) |
-| Messaging | Apache Kafka via transactional outbox pattern |
+| Database | PostgreSQL 16 (append-only ledger, serializable isolation, NUMERIC(38,18) precision) |
+| Cache | Redis 7 (balance cache, nonce management, rate limiting, price oracle) |
+| Messaging | Apache Kafka via transactional outbox pattern + Dead Letter Queue |
 | Blockchain | Ethereum L1 (ethers.js v6) |
-| API | Express REST |
-| Testing | Jest + ts-jest |
+| API | Express REST + Prometheus /metrics |
+| Testing | Jest + ts-jest (39 tests) |
 | Infrastructure | Docker Compose (Postgres, Redis, Kafka, Zookeeper) |
+| Monitoring | Prometheus-compatible metrics export, anomaly detection, SIEM integration |
 
 This system implements the **core backend infrastructure** of a digital-asset custody platform — the kind of system that underpins institutional custodians (BitGo, Fireblocks, Anchorage), crypto exchanges (Coinbase, Kraken), and fintech platforms building crypto-native banking products.
-
-It handles the full operational lifecycle: custody-grade financial accounting, blockchain transaction creation and monitoring, wallet key management orchestration, chain event indexing with reorg resilience, and automated integrity verification — all through an event-driven architecture that guarantees no state change is ever lost.
 
 ## What This Does
 
 ### 1. Custody-Grade Financial Ledger
 
-Every movement of funds is recorded as a balanced debit/credit pair in an immutable, hash-chained ledger. You cannot lose track of where money is, you cannot edit history, and you can cryptographically prove the records haven't been tampered with.
-
 - **Double-entry accounting** — every transfer creates balanced debit + credit entries
 - **Hash-chained audit trail** — SHA-256 chain links every entry to its predecessor
-- **Append-only enforcement** — database triggers physically prevent UPDATE/DELETE on ledger rows
+- **Append-only enforcement** — database triggers physically prevent UPDATE/DELETE
 - **Serializable isolation** — the strongest ACID guarantee Postgres offers
 - **Idempotency keys** — duplicate requests are safely deduplicated
 - **Explicit reversals** — corrections are new mirror entries, never mutations
+- **Decimal precision** — NUMERIC(38,18) columns for high-precision financial calculations
 
 ### 2. Ethereum L1 Integration
 
-The system connects to Ethereum, watches for new blocks and events, submits signed transactions, tracks confirmation and finality, and handles chain-level edge cases that can cause fund loss if ignored.
-
 - **Block-by-block indexing** — continuous ingestion of blocks and contract events
-- **Reorg detection and recovery** — detects chain forks by verifying parent hash continuity, marks affected data, and re-indexes from the fork point
-- **Finality tracking** — configurable confirmation threshold (default 12 blocks) distinguishing "confirmed" from "finalized"
+- **Reorg detection and recovery** — detects chain forks, marks affected data, re-indexes
+- **Finality tracking** — configurable confirmation threshold (default 12 blocks)
 - **Gas estimation** — EIP-1559 aware fee calculation
-- **Stuck transaction detection** — alerts when submitted transactions haven't confirmed after 15 minutes
+- **Stuck transaction detection** — alerts after 15 minutes without confirmation
 
 ### 3. Wallet & Signing Pipeline
 
-Manages blockchain wallets and orchestrates the transaction signing workflow, separating protocol logic from security controls.
-
-- **Wallet lifecycle** — create, classify (hot/warm/cold/deposit), and monitor wallets
+- **Wallet lifecycle** — create, classify (hot/warm/cold/deposit), and monitor
 - **Transaction pipeline** — create → sign → submit → monitor → confirm
-- **Nonce management** — Redis atomic increment prevents nonce collisions under concurrency
-- **KMS/HSM integration interface** — pluggable signing service (local dev signer for testing, production uses MPC/HSM)
-- **Reorg handling** — marks affected transactions when chain reorganizations occur
+- **DB-enforced state machine** — trigger rejects invalid state transitions at database level
+- **Nonce management** — Redis atomic increment prevents collisions
+- **KMS/HSM/MPC integration** — pluggable signing with provider abstraction
 
-### 4. Event-Driven Architecture
+### 4. Event-Driven Architecture with DLQ
 
-Every state change is guaranteed to reach downstream systems through the transactional outbox pattern.
+- **Transactional outbox** — events written atomically with state changes
+- **Kafka publishing** — relay service with idempotent producer
+- **Dead Letter Queue** — failed messages captured with exponential backoff retry (5 attempts), manual reprocessing, and exhaustion tracking
+- **FOR UPDATE SKIP LOCKED** — concurrent-safe polling
 
-- **Transactional outbox** — events are written to the outbox table in the same database transaction as the state change
-- **Kafka publishing** — a relay service polls unpublished events and delivers them to Kafka topics
-- **At-least-once delivery** — guaranteed delivery; consumers must be idempotent
-- **FOR UPDATE SKIP LOCKED** — concurrent-safe polling without blocking
+### 5. Identity & Access Management
 
-### 5. Automated Reconciliation
+- **Authentication** — password hashing (SHA-256 + salt), timing-safe comparison, session tokens
+- **Multi-factor authentication** — TOTP-based MFA with backup codes
+- **RBAC** — roles, permissions, resource:action grants
+- **Account lockout** — 5 failed attempts triggers lock
+- **API key management** — scoped keys with IP whitelist and rate limits
+- **Separation of duties** — DB-level reader/writer role enforcement
 
-Scheduled jobs independently verify system integrity without relying on application-layer correctness.
+### 6. Governance & Approval Workflows
 
-- **Balance reconciliation** — compares cached balances against reconstructed-from-ledger balances every 5 minutes
-- **Hash chain verification** — walks every account's entry chain checking for broken links every 15 minutes
-- **Alert on failure** — emits events to Kafka when discrepancies are detected
+- **Four-eyes principle** — maker and checker must be different actors
+- **M-of-N approvals** — configurable threshold signing off on operations
+- **Timelocks** — delayed execution for high-risk operations
+- **Auto-expiry** — requests expire after configurable hours
+- **Emergency kill switches** — instant feature shutdown with optional auto-reactivate
 
-## Who This Benefits
+### 7. Compliance & Regulatory Controls
 
-### Institutional Clients
+- **OFAC sanctions screening** — exact address match against SDN lists
+- **Entity screening** — fuzzy name matching via pg_trgm similarity
+- **Transaction screening** — velocity, amount, and frequency checks
+- **Travel Rule** — FATF-compliant originator/beneficiary messaging
+- **SAR filing** — Suspicious Activity Report creation and tracking
+- **KYC status** — holder-level verification with whitelist enforcement
 
-| Need | How This Addresses It |
-|------|----------------------|
-| **Regulatory audit trail** | Every fund movement is recorded in a hash-chained, append-only ledger with external reference traceability. The entire history can be reconstructed from raw entries. |
-| **Counterparty risk elimination** | Serializable isolation + row-level locking ensures no double-spend, no race conditions, and no phantom reads — even under high concurrency. |
-| **Operational resilience** | Reorg detection prevents silent fund loss from chain reorganizations. Stuck transaction detection prevents capital lockup. Circuit-breaker patterns prevent cascading RPC failures. |
-| **Separation of duties** | Database-enforced least-privilege roles (reader vs. writer) ensure that read-only services cannot mutate ledger data at the infrastructure level. |
-| **Multi-system integration** | The Kafka event bus allows compliance, reporting, notifications, and analytics systems to react to every state change without coupling to the core. |
-| **Disaster recovery** | The append-only ledger + hash chain enables point-in-time reconstruction and cross-system reconciliation. |
+### 8. Risk Management
 
-### Retail Platforms
+- **Velocity policies** — sliding-window transaction rate limits
+- **Concentration policies** — percentage-of-supply exposure limits
+- **Circuit breakers** — automatic service protection (closed → open → half_open)
+- **Kill switches** — emergency feature shutdown
+- **DB-enforced state machines** — invalid transitions rejected at trigger level
 
-| Need | How This Addresses It |
-|------|----------------------|
-| **Correct balances at scale** | The balance cache provides O(1) lookups while the ledger provides provably correct derived balances. Reconciliation jobs catch any drift. |
-| **Fast transaction processing** | Redis-backed nonce management and concurrent-safe ledger posting allow high-throughput transaction submission. |
-| **Real-time event streaming** | Kafka events enable real-time notifications, portfolio updates, and activity feeds for end users. |
-| **Multi-chain readiness** | The architecture cleanly separates chain-specific logic (adapters) from business logic (ledger, wallets). Adding new chains requires only a new adapter. |
-| **Uptime under chain instability** | Reorg handling, stuck tx detection, and automated reconciliation mean the platform stays correct even when the underlying chain misbehaves. |
+### 9. Key Management
+
+- **HSM/MPC/KMS providers** — pluggable signing delegation
+- **Key rotation** — 90-day policy with ceremony-based workflows
+- **Sharding** — configurable shard count and threshold (M-of-N)
+- **Geographic distribution** — multi-region key placement
+- **Key ceremonies** — generation, rotation, recovery, destruction with attestation
+
+### 10. Settlement & Clearing
+
+- **Atomic DvP** — delivery-versus-payment in single serializable transaction
+- **PvP settlement** — payment-versus-payment for FX
+- **Netting** — reduces gross obligations to net with savings calculation
+- **DB-enforced state machine** — settlement transitions validated by trigger
+- **Cross-chain support** — settlement type for multi-chain operations
+
+### 11. Lending, Margin & Liquidation
+
+- **Loan origination** — collateral + loan with configurable interest rates
+- **Daily interest accrual** — automated batch processing
+- **LTV monitoring** — real-time loan-to-value ratio tracking
+- **Margin calls** — automatic trigger when LTV exceeds threshold
+- **Waterfall liquidation** — seize collateral → repay debt → penalty → return surplus
+- **DB-enforced state machine** — loan transitions validated by trigger
+
+### 12. FX Conversion Engine
+
+- **Rate management** — bid/ask/mid/spread from multiple providers
+- **Rate locking** — 30-second guaranteed quote with Redis TTL
+- **Atomic PvP execution** — both legs settle or neither (serializable transaction)
+- **Spread calculation** — configurable markup in basis points
+
+### 13. Price Oracle
+
+- **Multi-source aggregation** — accepts quotes from multiple providers
+- **VWAP calculation** — volume-weighted average price
+- **Median filtering** — statistical median for robustness
+- **Outlier rejection** — discards quotes >10% from median
+- **Staleness detection** — flags stale data when sources drop
+- **Confidence scoring** — composite score based on source count and price agreement
+
+### 14. Treasury Management
+
+- **Portfolio management** — target allocations with drift detection
+- **NAV calculation** — net asset value from position valuations
+- **Rebalancing** — threshold-based rebalance action generation
+- **Proof of reserves** — reserves-to-liabilities ratio verification
+
+### 15. Monitoring & Observability
+
+- **Prometheus metrics** — `/metrics` endpoint in standard text format (15+ metric types)
+- **Anomaly detection** — z-score statistical deviation on sliding windows
+- **SIEM export** — structured alert events for security tools
+- **Fraud detection** — velocity, large transaction, and new destination checks
+- **Configurable alerting** — threshold, anomaly, pattern, and absence rules with cooldown
+
+### 16. Tokenization
+
+- **Asset registration** — real estate, commodities, securities, bonds, funds
+- **Token lifecycle** — create, activate, pause, mint, burn, transfer
+- **Cap table** — holder tracking with balance history
+- **Transfer restrictions** — whitelist, jurisdiction, lockup, max holders, min/max holding
+- **Corporate actions** — dividends, votes, stock splits with record-date snapshots
+
+### 17. Additional Institutional Features
+
+- **Trust domains** — business unit isolation with cross-domain authorization
+- **Asset lifecycle** — issuance, minting, burning, redemption, dividends, maturity
+- **Vendor risk** — assessments, SLA monitoring, breach detection
+- **Privacy** — ZK balance proofs, selective disclosure, data classification, retention
+- **Infrastructure** — node health monitoring, load balancing, geographic failover
+- **Field-level encryption** — AES-256-GCM for sensitive data at rest
+- **Automated reconciliation** — balance + hash chain verification every 5/15 minutes
 
 ## Architecture
 
 ```
-                    ┌──────────────────────────────────────────────────┐
-                    │              REQUEST FLOW                        │
-                    └──────────────────────────────────────────────────┘
+                    ┌──────────────────────────────────────────────────────────┐
+                    │                    REQUEST FLOW                           │
+                    └──────────────────────────────────────────────────────────┘
 
-    Client ──► Express API ──► Ledger Service ──► PostgreSQL
-                   │                  │                 │
-                   │                  │         ┌──────────────┐
-                   │                  └────────►│ Outbox Table │
-                   │                            └──────┬───────┘
-                   │                                   │
-                   │            ┌───────────────────────┘
-                   │            ▼
-                   │     Outbox Relay ──────────────────► Kafka Topics
+    Client ──► Express API ──► Auth Middleware ──► Service Layer ──► PostgreSQL
+                   │                                    │                 │
+                   │                                    │         ┌──────────────┐
+                   │                                    └────────►│ Outbox Table │
+                   │                                              └──────┬───────┘
+                   │                                                     │
+                   │                  ┌──────────────────────────────────┘
+                   │                  ▼
+                   │           Outbox Relay ────────────► Kafka Topics
+                   │                  │
+                   │                  └── (on failure) ──► Dead Letter Queue
                    │
-                   ├──► Wallet Service ──► Redis (nonce) ──► Chain Service
-                   │                                              │
-                   │                                              ▼
-                   │                                    Ethereum L1 (RPC)
-                   │
-                   ├──► Block Indexer ──► PostgreSQL (blocks, events)
+                   ├──► Wallet Service ──► Key Mgmt ──► HSM/MPC Provider
                    │         │
-                   │         └──► Reorg Detection ──► Recovery
+                   │         └──► Redis (nonce) ──► Chain Service ──► Ethereum
                    │
-                   └──► Reconciliation Service (cron)
+                   ├──► Settlement Service ──► Atomic DvP/PvP/Netting
+                   ├──► Lending Service ──► Margin Monitor ──► Liquidation
+                   ├──► FX Service ──► Rate Lock ──► PvP Conversion
+                   ├──► Price Oracle ──► VWAP/Median ──► Staleness Check
+                   ├──► Block Indexer ──► Reorg Detection ──► Recovery
+                   ├──► Reconciliation (cron) ──► Balance + Hash Verification
+                   └──► Monitoring ──► Prometheus /metrics
                               │
-                              ├──► Balance Verification
-                              └──► Hash Chain Verification
+                              ├──► Anomaly Detection (z-score)
+                              └──► SIEM Export + Alerting
 ```
-
-### Data Flow
-
-1. **API request** → Express validates and routes to the appropriate service
-2. **Ledger posting** → Serializable transaction writes journal entry + ledger entries + balance cache update + outbox event — all atomically
-3. **Outbox relay** → Background process polls unpublished events and delivers to Kafka
-4. **Block indexer** → Continuously ingests blocks, stores events, detects reorgs
-5. **Chain service** → Monitors submitted transactions, tracks confirmations, detects stuck txs
-6. **Reconciliation** → Cron jobs verify balance integrity and hash chain continuity
 
 ## Core Components
 
 ### Ledger Service (`src/database/ledger-service.ts`)
-
-The heart of the system. Posts double-entry journal entries with hash chaining, serializable isolation, idempotency, and atomic outbox writes. Supports explicit reversals for corrections.
+Double-entry journal entries with hash chaining, serializable isolation, idempotency, and atomic outbox writes.
 
 ### Wallet Service (`src/wallet/wallet-service.ts`)
-
-Manages wallet registration, transaction creation (with Redis-backed atomic nonce allocation), lifecycle tracking (pending → signing → submitted → confirmed → failed → reorged), and reorg handling.
+Wallet registration, transaction creation with atomic nonce allocation, lifecycle tracking, and reorg handling.
 
 ### Block Indexer (`src/indexer/block-indexer.ts`)
-
-Continuously polls Ethereum for new blocks. Stores block metadata and contract events. Detects reorgs by verifying parent hash continuity. On reorg detection: marks affected blocks/events/transactions, resets to fork point, emits alert events.
+Continuous block ingestion, event indexing, reorg detection via parent hash verification.
 
 ### Chain Service (`src/chain/chain-service.ts`)
-
-Handles transaction submission, gas estimation (EIP-1559), finality tracking with configurable confirmation threshold, and stuck transaction detection with alerting.
+Transaction submission, EIP-1559 gas estimation, finality tracking, stuck transaction detection.
 
 ### Outbox Relay (`src/messaging/outbox-relay.ts`)
+Polls outbox with `FOR UPDATE SKIP LOCKED`, publishes to Kafka, routes failures to DLQ.
 
-Polls the transactional outbox table using `FOR UPDATE SKIP LOCKED` for concurrent safety. Publishes to Kafka with an idempotent producer. Marks entries as published after successful delivery.
+### DLQ Service (`src/messaging/dlq-service.ts`)
+Exponential backoff retry (5 attempts), manual reprocessing, exhaustion tracking, DLQ Kafka topics.
 
-### Redis Cache (`src/cache/redis.ts`)
+### Key Management (`src/key-management/key-service.ts`)
+HSM/MPC/KMS signing delegation, rotation workflows, sharding, geographic distribution, ceremonies.
 
-Provides balance caching (TTL-based read-through), atomic nonce management, sliding-window rate limiting, block height tracking, and transaction status caching.
+### Settlement Service (`src/settlement/settlement-service.ts`)
+Atomic DvP/PvP/FoP settlement, multilateral netting with savings calculation.
 
-### Reconciliation Service (`src/reconciliation/reconciliation-service.ts`)
+### Lending Service (`src/lending/lending-service.ts`)
+Loan origination, interest accrual, LTV monitoring, margin calls, waterfall liquidation.
 
-Cron-scheduled jobs that verify:
-- **Balance integrity** — cached balances match independently reconstructed balances from raw ledger entries
-- **Hash chain integrity** — no broken links, no sequence gaps in the cryptographic chain
+### FX Service (`src/fx/fx-service.ts`)
+Rate management, rate locking, atomic PvP conversion, spread calculation.
 
-Emits Kafka events on failures for downstream alerting.
+### Price Oracle (`src/oracle/price-oracle-service.ts`)
+Multi-source VWAP, median filtering, outlier rejection, staleness detection, confidence scoring.
 
-### API Layer (`src/api/app.ts`)
+### Metrics Exporter (`src/monitoring/metrics-exporter.ts`)
+Prometheus-compatible `/metrics` endpoint with 15+ metric types.
 
-REST endpoints for:
-- Posting journal entries and reversals
-- Querying account balances and transaction history
-- Creating wallets and submitting blockchain transactions
-- Querying chain state, blocks, and indexed events
-- Viewing reconciliation run history
+### Monitoring Service (`src/monitoring/monitoring-service.ts`)
+Alert rules, anomaly detection (z-score), fraud detection, SIEM export.
+
+## Institutional Controls
+
+### Security (`src/security/`)
+- **auth-service.ts** — Authentication, RBAC, MFA, session management, API keys
+- **audit-service.ts** — Append-only audit trail with actor context and risk levels
+- **encryption-service.ts** — AES-256-GCM field-level encryption, PII masking
+
+### Risk (`src/risk/`)
+- **risk-service.ts** — Velocity, concentration, and exposure policy evaluation
+- **circuit-breaker.ts** — Service protection + kill switch emergency shutdown
+
+### Compliance (`src/compliance/`)
+- **aml-service.ts** — OFAC screening, entity matching, Travel Rule, SAR filing
+
+### Governance (`src/governance/`)
+- **approval-service.ts** — Four-eyes, maker-checker, M-of-N approvals, timelocks
+
+### Trust Domains (`src/trust-domains/`)
+- **trust-domain-service.ts** — Isolation, cross-domain authorization, asset segregation
+
+### Treasury (`src/treasury/`)
+- **treasury-service.ts** — Portfolio NAV, rebalancing, proof of reserves
+
+### Tokenization (`src/tokenization/`)
+- **token-service.ts** — Mint/burn/transfer with compliance checks
+- **compliance-service.ts** — Transfer restrictions, whitelisting, lockup
+- **corporate-actions-service.ts** — Dividends, votes, stock splits
+- **asset-service.ts** — Asset registration and lifecycle
+
+### Other
+- **vendor/vendor-risk-service.ts** — Vendor assessments, SLA monitoring
+- **privacy/privacy-service.ts** — ZK proofs, selective disclosure, retention
+- **infrastructure/infrastructure-service.ts** — Node health, load balancing, failover
+- **asset-lifecycle/asset-lifecycle-service.ts** — Issuance, burning, dividends, maturity
 
 ## Ledger Guarantees
 
 | Guarantee | Implementation |
 |-----------|---------------|
-| Append-only ledger | Postgres triggers block UPDATE/DELETE on `ledger_entries` with `RAISE EXCEPTION` |
+| Append-only ledger | Postgres triggers block UPDATE/DELETE with `RAISE EXCEPTION` |
 | Double-entry accounting | Deferred constraint trigger validates `SUM(debits) = SUM(credits)` at COMMIT |
-| Integer amounts only | `BIGINT` columns with `CHECK (amount != 0)` — no floating-point precision loss |
-| Derived balances with cache | `balance_cache` table updated atomically in same transaction; independently reconstructable |
+| Decimal precision | `NUMERIC(38,18)` for oracle, lending, FX; `BIGINT` for core ledger |
+| Derived balances with cache | `balance_cache` updated atomically; independently reconstructable |
 | Idempotency keys | `UNIQUE` constraint on `journal_entries.idempotency_key` |
-| Database-enforced constraints | CHECK constraints on amounts, balances, directions, hash lengths |
-| Serializable isolation | `BEGIN ISOLATION LEVEL SERIALIZABLE` + `SELECT ... FOR UPDATE` row locking |
-| Reconciliation jobs | Cron-based balance + hash chain verification with automated alerting |
-| Explicit reversals | Mirror entries posted; original marked as reversed (never mutated) |
-| Least-privilege permissions | `ledger_reader` role (SELECT only), `ledger_writer` role (INSERT + limited UPDATE) |
-| Balanced journal entries | Deferred constraint trigger rejects unbalanced entries at COMMIT |
-| Atomic posting | Single serializable transaction for all lines + balance cache + outbox event |
-| Historical reconstruction | `reconstructBalance()` re-derives any balance from raw ledger entries |
-| UTC timestamps | `TIMESTAMPTZ` with `DEFAULT NOW()` on all tables |
-| External reference traceability | `external_ref` + `external_ref_type` on journal entries |
+| DB-enforced state machines | Trigger functions reject invalid status transitions |
+| Serializable isolation | `BEGIN ISOLATION LEVEL SERIALIZABLE` + `SELECT ... FOR UPDATE` |
+| Dead Letter Queue | Failed Kafka publishes captured with retry tracking |
+| Reconciliation jobs | Cron-based balance + hash chain verification with alerting |
 | Cryptographic audit trail | SHA-256 hash chain validated by `trg_validate_hash_chain` trigger |
-| ACID guarantees | Serializable isolation (I), WAL durability (D), CHECK constraints (C), single-transaction atomicity (A) |
 
 ## Database Schema
 
-### Core Ledger Tables
-
-- **`accounts`** — Account registry with type classification (asset, liability, equity, revenue, expense)
-- **`journal_entries`** — Double-entry headers with idempotency keys and external references
-- **`ledger_entries`** — Individual debit/credit lines with SHA-256 hash chain (append-only, trigger-enforced)
-- **`balance_cache`** — Derived balance materialization for O(1) lookups
+### Core Ledger
+- **`accounts`** — Account registry (asset, liability, equity, revenue, expense)
+- **`journal_entries`** — Double-entry headers with idempotency keys
+- **`ledger_entries`** — Debit/credit lines with SHA-256 hash chain (append-only)
+- **`balance_cache`** — Derived balance materialization with `balance_precise` NUMERIC column
 
 ### Messaging
-
 - **`outbox`** — Transactional outbox for guaranteed Kafka delivery
+- **`dead_letter_queue`** — Failed messages with retry tracking and exponential backoff
 
 ### Wallet & Chain
+- **`wallets`** — Registered wallets (hot/warm/cold/deposit) with KMS key reference
+- **`transactions_blockchain`** — Full lifecycle with DB-enforced state machine trigger
 
-- **`wallets`** — Registered wallets with chain, address, type (hot/warm/cold/deposit), and KMS key reference
-- **`transactions_blockchain`** — Full transaction lifecycle with status, confirmations, gas details, and block info
+### Settlement & Clearing
+- **`settlement_instructions`** — DvP/PvP/FoP/internal/cross-chain with state machine trigger
+- **`netting_groups`** — Multilateral netting calculations
+
+### Lending
+- **`loans`** — Loan records with LTV, margin/liquidation thresholds, state machine trigger
+- **`price_quotes`** — Oracle price data with NUMERIC(38,18) precision
+- **`fx_rates`** — FX bid/ask/mid/spread history
+- **`fx_conversions`** — FX conversion records with rate lock
+
+### IAM & Security
+- **`users`** — User accounts with MFA, lockout tracking
+- **`roles`**, **`permissions`**, **`user_roles`**, **`role_permissions`** — RBAC
+- **`sessions`**, **`api_keys`** — Authentication tokens
+- **`audit_events`** — Append-only audit trail (trigger-enforced)
+
+### Governance
+- **`approval_policies`** — M-of-N approval rules
+- **`approval_requests`** — Pending approvals with state machine trigger
+- **`approval_decisions`** — Individual approve/reject votes
+- **`timelocks`** — Delayed execution for sensitive operations
+
+### Compliance
+- **`sanctions_lists`** — OFAC/UN/EU/UK sanctions entries
+- **`screening_results`** — Address/entity/transaction screening outcomes
+- **`suspicious_activity_reports`** — SAR filings
+- **`travel_rule_messages`** — FATF Travel Rule compliance
+
+### Risk & Operations
+- **`risk_policies`** — Velocity, concentration, exposure policies
+- **`risk_events`** — Triggered risk violations
+- **`circuit_breaker_state`** — Service health tracking
+- **`kill_switches`** — Emergency feature toggles
+- **`alert_rules`**, **`alert_events`** — Monitoring and alerting
+
+### Institutional
+- **`key_metadata`**, **`key_ceremonies`** — Key management lifecycle
+- **`trust_domains`**, **`cross_domain_policies`** — Isolation boundaries
+- **`treasury_portfolios`**, **`treasury_positions`** — Portfolio management
+- **`vendors`**, **`vendor_assessments`**, **`vendor_sla_metrics`** — Third-party risk
+- **`legal_agreements`**, **`agreement_signatures`** — Legal framework
+- **`contract_registry`**, **`contract_upgrades`** — Smart contract controls
+- **`asset_lifecycle_events`** — Issuance/burning/dividend/maturity records
+- **`data_classifications`**, **`retention_policies`**, **`disclosure_policies`** — Privacy
 
 ### Indexer
-
-- **`indexed_blocks`** — Ingested block metadata with reorg status tracking
-- **`indexed_events`** — Contract events linked to blocks, with processing status
+- **`indexed_blocks`** — Block metadata with reorg status
+- **`indexed_events`** — Contract events with processing status
 
 ### Operations
-
-- **`reconciliation_runs`** — Reconciliation execution history with pass/fail status and discrepancy counts
+- **`reconciliation_runs`** — Reconciliation execution history
 
 ## API Reference
 
-### Accounts
+### Core APIs
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/v1/accounts` | List all accounts (paginated: `?limit=50&offset=0`) |
-| `POST` | `/api/v1/accounts` | Create an account (requires `externalId`, `accountType`, `currency`) |
-
-### Ledger
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/journal` | Post a double-entry journal (requires `idempotencyKey` and balanced `lines`) |
-| `POST` | `/api/v1/journal/:id/reverse` | Reverse a journal entry (posts mirror entries) |
-| `GET` | `/api/v1/accounts/:id/balance` | Get cached balance for an account |
-| `GET` | `/api/v1/accounts/:id/history` | Get ledger entry history (paginated) |
-
-### Wallets
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/wallets` | Register a new wallet |
-| `GET` | `/api/v1/wallets/:id` | Get wallet details |
-| `POST` | `/api/v1/wallets/:id/transactions` | Create and queue a blockchain transaction |
-
-### Chain
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/chain/state` | Get current chain state (block number, gas prices) |
-| `GET` | `/api/v1/chain/tx/:hash` | Get transaction status with finality info |
-| `POST` | `/api/v1/chain/estimate-gas` | Estimate gas for a transaction (EIP-1559) |
-
-### Indexer
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/blocks` | List recently indexed blocks |
-| `GET` | `/api/v1/blocks/:number` | Get a specific indexed block |
-| `GET` | `/api/v1/events` | Query indexed events (filter by contract, event signature) |
-
-### Operations
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/reconciliation/runs` | List recent reconciliation runs |
 | `GET` | `/health` | System health check |
+| `GET` | `/metrics` | Prometheus metrics (text format) |
+| `GET` | `/api/v1/accounts` | List accounts (paginated) |
+| `POST` | `/api/v1/accounts` | Create account |
+| `POST` | `/api/v1/journal` | Post double-entry journal |
+| `POST` | `/api/v1/journal/:id/reverse` | Reverse a journal entry |
+| `GET` | `/api/v1/accounts/:id/balance` | Get account balance |
+| `GET` | `/api/v1/accounts/:id/history` | Get ledger history |
+| `POST` | `/api/v1/wallets` | Register wallet |
+| `POST` | `/api/v1/wallets/:id/transactions` | Submit blockchain transaction |
+| `GET` | `/api/v1/chain/state` | Current chain state |
+| `GET` | `/api/v1/chain/tx/:hash` | Transaction status |
+| `POST` | `/api/v1/chain/estimate-gas` | Gas estimation |
+| `GET` | `/api/v1/blocks` | List indexed blocks |
+| `GET` | `/api/v1/events` | Query indexed events |
+
+### Institutional APIs (`/api/v1/institutional/`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/keys` | Register signing key |
+| `POST` | `/keys/:keyId/rotate` | Initiate key rotation |
+| `POST` | `/keys/:keyId/sign` | Sign with key |
+| `POST` | `/settlements` | Create settlement instruction |
+| `POST` | `/settlements/:id/execute` | Execute atomic settlement |
+| `POST` | `/settlements/netting` | Calculate netting |
+| `POST` | `/lending/loans` | Originate loan |
+| `POST` | `/lending/loans/:id/repay` | Repay loan |
+| `POST` | `/lending/loans/:id/liquidate` | Execute liquidation |
+| `POST` | `/lending/monitor` | Monitor LTV positions |
+| `POST` | `/fx/rates` | Submit FX rate |
+| `POST` | `/fx/quote` | Get locked FX quote |
+| `POST` | `/fx/conversions/:id/execute` | Execute FX conversion |
+| `POST` | `/oracle/quotes` | Submit price quote |
+| `GET` | `/oracle/prices/:pair` | Get aggregated price (VWAP + median) |
+| `POST` | `/treasury/portfolios` | Create treasury portfolio |
+| `GET` | `/treasury/portfolios/:id/nav` | Calculate NAV |
+| `GET` | `/treasury/portfolios/:id/proof-of-reserves` | Proof of reserves |
+| `POST` | `/monitoring/rules` | Create alert rule |
+| `GET` | `/monitoring/alerts` | Get unresolved alerts |
+| `GET` | `/monitoring/siem-export` | Export SIEM events |
+| `POST` | `/governance/policies` | Create approval policy |
+| `POST` | `/governance/requests` | Submit for approval |
+| `POST` | `/governance/requests/:id/approve` | Approve request |
+| `POST` | `/compliance/screen` | Screen address/entity |
+| `POST` | `/compliance/travel-rule` | Create Travel Rule message |
+| `POST` | `/compliance/sar` | File SAR |
+| `POST` | `/risk/check` | Evaluate transaction risk |
+| `POST` | `/risk/kill-switch` | Toggle kill switch |
+| `GET` | `/dlq/stats` | DLQ statistics |
+| `GET` | `/dlq/entries` | List DLQ entries |
+| `POST` | `/dlq/:id/reprocess` | Reprocess DLQ entry |
+| `POST` | `/trust-domains` | Create trust domain |
+| `POST` | `/trust-domains/authorize` | Cross-domain authorization |
+| `POST` | `/vendors` | Register vendor |
+| `POST` | `/vendors/:id/assessments` | Conduct vendor assessment |
+| `POST` | `/privacy/zk-proof/balance` | Generate ZK balance proof |
+| `POST` | `/infrastructure/nodes` | Register infra node |
+| `GET` | `/infrastructure/capacity` | Capacity metrics |
+| `POST` | `/infrastructure/failover` | Geographic failover |
+
+### Tokenization APIs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/tokens` | Create token |
+| `POST` | `/api/v1/tokens/:id/mint` | Mint tokens |
+| `POST` | `/api/v1/tokens/:id/burn` | Burn tokens |
+| `POST` | `/api/v1/tokens/:id/transfer` | Transfer with compliance |
+| `GET` | `/api/v1/tokens/:id/holders` | Cap table |
+| `POST` | `/api/v1/tokens/:id/restrictions` | Add transfer restriction |
+| `POST` | `/api/v1/tokens/:id/actions` | Create corporate action |
 
 ## Installation
 
 ### Prerequisites
 
 - Node.js 20+
-- Docker and Docker Compose (for infrastructure services)
+- Docker and Docker Compose
 - An Ethereum RPC endpoint (Infura, Alchemy, or local node)
 
 ### Quick Start
 
 ```bash
-# Clone the repository
 git clone https://github.com/pavondunbar/Blockchain-Custody-Infrastructure.git
 cd Blockchain-Custody-Infrastructure
 
-# Start infrastructure (Postgres, Redis, Kafka, Zookeeper)
 docker compose up -d
-
-# Install dependencies
 npm install
-
-# Create the tradfi_web3 database in Postgres
 psql -h localhost -U postgres -c "CREATE DATABASE tradfi_web3;"
-
-# Run database migrations (uses postgres/postgres admin credentials)
 npm run migrate
-
-# Fix outbox permissions (migration grants INSERT but relay needs UPDATE)
 psql -h localhost -U postgres -d tradfi_web3 -c "GRANT SELECT, UPDATE ON outbox TO ledger_writer;"
 
-# Open another terminal and Fork Ethereum Mainnet locally
-anvil --fork-url [ETHEREUM MAINNET URL VIA ALCHEMY/INFURA/ETC] --chain-id 1337 --balance 1000000 --accounts 6 --host 0.0.0.0 --port 8545
+# Fork Ethereum Mainnet (separate terminal)
+anvil --fork-url [YOUR_RPC_URL] --chain-id 1337 --host 0.0.0.0 --port 8545
 
-# Start the application
 npm run dev
 ```
 
-### Verify Installation
+### Verify
 
 ```bash
-# Check health endpoint
 curl http://localhost:3000/health
+# {"status":"ok","timestamp":"..."}
 
-# Expected response:
-# {"status":"ok","timestamp":"2026-06-04T23:00:00.000Z"}
-```
-
-## Usage
-
-### Create an Account
-
-```bash
-curl -X POST http://localhost:3000/api/v1/accounts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "externalId": "client-assets-001",
-    "accountType": "asset",
-    "currency": "USD",
-    "metadata": {"department": "treasury"}
-  }'
-```
-
-### List Accounts
-
-```bash
-curl http://localhost:3000/api/v1/accounts?limit=50&offset=0
-```
-
-### Post a Journal Entry (Double-Entry Transfer)
-
-```bash
-curl -X POST http://localhost:3000/api/v1/journal \
-  -H "Content-Type: application/json" \
-  -d '{
-    "idempotencyKey": "transfer-001",
-    "description": "Client deposit",
-    "externalRef": "wire-ref-12345",
-    "externalRefType": "bank_wire",
-    "lines": [
-      {"accountId": "<asset-account-uuid>", "amount": "1000000", "direction": "debit"},
-      {"accountId": "<liability-account-uuid>", "amount": "1000000", "direction": "credit"}
-    ]
-  }'
-```
-
-### Create a Wallet
-
-```bash
-curl -X POST http://localhost:3000/api/v1/wallets \
-  -H "Content-Type: application/json" \
-  -d '{
-    "accountId": "<account-uuid>",
-    "chain": "ethereum",
-    "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD45",
-    "walletType": "hot",
-    "keyId": "kms-key-ref-001"
-  }'
-```
-
-### Submit a Transaction
-
-```bash
-curl -X POST http://localhost:3000/api/v1/wallets/<wallet-id>/transactions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "toAddress": "0x1234567890abcdef1234567890abcdef12345678",
-    "amount": "1000000000000000000"
-  }'
-```
-
-### Query Balance
-
-```bash
-curl http://localhost:3000/api/v1/accounts/<account-id>/balance
-```
-
-### Query Chain State
-
-```bash
-curl http://localhost:3000/api/v1/chain/state
+curl http://localhost:3000/metrics
+# Prometheus text format metrics
 ```
 
 ## Testing
 
 ```bash
-# Run all tests
-npm test
-
-# Run with coverage
-npx jest --coverage
+npm test              # 39 tests across 3 suites
+npx jest --coverage   # With coverage report
 ```
 
-The test suite covers:
-
-- **Ledger service** — balanced posting with hash chain, unbalanced rejection, idempotency deduplication, hash chain continuity, journal reversal, balance reconstruction, and serialization failure (double-spend prevention)
-- **Wallet service** — wallet creation, transaction submission with atomic nonce allocation, inactive/missing wallet rejection, reorg handling, and concurrent nonce uniqueness
-
-Tests use mocked database and Redis layers, so they run without infrastructure dependencies.
-
-### Continuous Integration
-
-The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and PR to `main`:
-
-1. **Lint** — ESLint with TypeScript rules
-2. **Build** — Full TypeScript compilation
-3. **Test** — Jest test suite
-
-Matrix-tested on Node.js 20 and 22.
+Test suites:
+- **Ledger service** — balanced posting, hash chain, idempotency, reversals, double-spend prevention
+- **Wallet service** — creation, nonce allocation, reorg handling, concurrency
+- **Institutional services** — key management, settlement, treasury, monitoring, lending, FX, privacy, infrastructure, trust domains, asset lifecycle, vendor risk
 
 ## Configuration
 
-All configuration is via environment variables:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PG_HOST` | No | `localhost` | PostgreSQL host |
-| `PG_PORT` | No | `5432` | PostgreSQL port |
-| `PG_DATABASE` | No | `tradfi_web3` | PostgreSQL database name |
-| `PG_USER` | No | `app_writer` | PostgreSQL user (least-privilege) |
-| `PG_PASSWORD` | Yes | `password` | PostgreSQL password |
-| `PG_POOL_MAX` | No | `20` | Connection pool size |
-| `PG_ADMIN_USER` | No | `postgres` | Admin user for migrations |
-| `PG_ADMIN_PASSWORD` | No | `postgres` | Admin password for migrations |
-| `REDIS_HOST` | No | `localhost` | Redis host |
-| `REDIS_PORT` | No | `6379` | Redis port |
-| `REDIS_PASSWORD` | No | — | Redis password |
-| `KAFKA_BROKERS` | No | `localhost:9092` | Comma-separated Kafka broker addresses |
-| `KAFKA_CLIENT_ID` | No | `tradfi-web3` | Kafka client identifier |
-| `ETH_RPC_URL` | No | `http://localhost:8545` | Ethereum JSON-RPC endpoint |
-| `ETH_CHAIN_ID` | No | `1` | Ethereum chain ID |
-| `ETH_CONFIRMATIONS` | No | `12` | Required block confirmations for finality |
-| `PORT` | No | `3000` | API server port |
-| `LOG_LEVEL` | No | `info` | Pino log level |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PG_HOST` | `localhost` | PostgreSQL host |
+| `PG_PORT` | `5432` | PostgreSQL port |
+| `PG_DATABASE` | `tradfi_web3` | Database name |
+| `PG_USER` | `app_writer` | DB user (least-privilege) |
+| `PG_PASSWORD` | `password` | DB password |
+| `PG_POOL_MAX` | `20` | Connection pool size |
+| `REDIS_HOST` | `localhost` | Redis host |
+| `REDIS_PORT` | `6379` | Redis port |
+| `KAFKA_BROKERS` | `localhost:9092` | Kafka brokers |
+| `ETH_RPC_URL` | `http://localhost:8545` | Ethereum RPC |
+| `ETH_CONFIRMATIONS` | `12` | Finality threshold |
+| `PORT` | `3000` | API port |
+| `LOG_LEVEL` | `info` | Pino log level |
 
 ## Project Structure
 
@@ -478,122 +530,142 @@ src/
 ├── index.ts                               # Service orchestrator (entrypoint)
 ├── database/
 │   ├── migrations/
-│   │   └── 001_ledger_schema.sql          # Full Postgres schema with triggers
+│   │   ├── 001_ledger_schema.sql          # Core ledger with triggers
+│   │   ├── 002_tokenization_schema.sql    # Token/asset tables
+│   │   ├── 003_institutional_controls.sql # IAM, governance, risk, compliance, key mgmt
+│   │   └── 004_systemic_gaps.sql          # DLQ, decimal precision, lending, FX, state machines
 │   ├── connection.ts                      # Pool + serializable transaction helper
 │   ├── migrate.ts                         # Migration runner
 │   ├── ledger-service.ts                  # Double-entry posting engine
-│   └── ledger-service.test.ts             # Ledger integration tests
+│   └── ledger-service.test.ts             # Ledger tests
 ├── cache/
 │   └── redis.ts                           # Balance cache, nonce mgr, rate limiter
 ├── messaging/
-│   └── outbox-relay.ts                    # Transactional outbox → Kafka publisher
+│   ├── outbox-relay.ts                    # Outbox → Kafka with DLQ integration
+│   └── dlq-service.ts                    # Dead Letter Queue with retry/reprocess
 ├── wallet/
-│   ├── wallet-service.ts                  # Wallet CRUD, tx pipeline, signing interface
-│   └── wallet-service.test.ts             # Wallet integration tests
+│   ├── wallet-service.ts                  # Wallet CRUD, tx pipeline, signing
+│   └── wallet-service.test.ts             # Wallet tests
 ├── indexer/
-│   └── block-indexer.ts                   # Block ingestion, event indexing, reorg detection
+│   └── block-indexer.ts                   # Block ingestion, reorg detection
 ├── chain/
-│   └── chain-service.ts                   # Ethereum integration, finality, gas estimation
+│   └── chain-service.ts                   # Ethereum integration, finality, gas
 ├── reconciliation/
-│   └── reconciliation-service.ts          # Balance + hash chain verification cron jobs
+│   └── reconciliation-service.ts          # Balance + hash chain verification
+├── security/
+│   ├── auth-service.ts                    # IAM, RBAC, MFA, sessions, API keys
+│   ├── audit-service.ts                   # Append-only audit trail
+│   └── encryption-service.ts             # AES-256-GCM field encryption
+├── risk/
+│   ├── risk-service.ts                    # Velocity/concentration/exposure policies
+│   └── circuit-breaker.ts                # Circuit breakers + kill switches
+├── compliance/
+│   └── aml-service.ts                    # OFAC screening, Travel Rule, SAR
+├── governance/
+│   └── approval-service.ts              # Four-eyes, M-of-N, timelocks
+├── key-management/
+│   └── key-service.ts                   # HSM/MPC/KMS signing, rotation, sharding
+├── settlement/
+│   └── settlement-service.ts            # DvP/PvP/netting, atomic execution
+├── lending/
+│   └── lending-service.ts               # Loans, margin, liquidation
+├── fx/
+│   └── fx-service.ts                    # FX rates, locking, PvP conversion
+├── oracle/
+│   └── price-oracle-service.ts          # VWAP, median, outlier rejection
+├── treasury/
+│   └── treasury-service.ts             # NAV, rebalancing, proof of reserves
+├── monitoring/
+│   ├── monitoring-service.ts            # Alerting, anomaly detection, SIEM
+│   └── metrics-exporter.ts             # Prometheus /metrics endpoint
+├── trust-domains/
+│   └── trust-domain-service.ts         # Isolation, cross-domain auth
+├── asset-lifecycle/
+│   └── asset-lifecycle-service.ts      # Issuance, burning, dividends, maturity
+├── tokenization/
+│   ├── types.ts                         # Shared types
+│   ├── asset-service.ts                 # Asset registration
+│   ├── token-service.ts                 # Mint/burn/transfer/freeze
+│   ├── compliance-service.ts            # Transfer restrictions, whitelist
+│   └── corporate-actions-service.ts     # Dividends, votes, splits
+├── vendor/
+│   └── vendor-risk-service.ts          # Assessments, SLA monitoring
+├── privacy/
+│   └── privacy-service.ts             # ZK proofs, selective disclosure
+├── infrastructure/
+│   └── infrastructure-service.ts       # Node health, load balancing, failover
+├── institutional/
+│   └── institutional-services.test.ts  # Institutional module tests
 └── api/
-    └── app.ts                             # REST API (ledger, wallets, chain, blocks, events)
+    ├── app.ts                           # Express app + core routes + /metrics
+    └── institutional-routes.ts         # All institutional API endpoints
 
-.github/workflows/ci.yml                   # CI pipeline (lint, build, test on Node 20/22)
-docker-compose.yml                         # Postgres 16, Redis 7, Kafka, Zookeeper
+docker-compose.yml                       # Postgres 16, Redis 7, Kafka, Zookeeper
+.github/workflows/ci.yml                # CI: lint, build, test (Node 20/22)
 ```
 
 ## Failure Scenarios
 
 ### Chain Reorganization (Reorg) Handling
 
-A reorg occurs when the Ethereum network discards previously-accepted blocks in favor of a longer chain. Without proper handling, transactions believed to be confirmed can silently disappear — causing phantom balances and fund loss.
-
-**How the system detects it:**
-
 ```
 Block Indexer polls block N+1
   → Fetches block.parentHash
   → Compares against stored hash for block N
-  → MISMATCH detected → reorg triggered
+  → MISMATCH → reorg triggered → marks affected data → re-indexes from fork point
 ```
-
-**Recovery sequence:**
-
-```
-1. Identify fork point (walk back until parentHash matches)
-2. Mark all indexed_blocks at height ≥ fork as status = 'reorged'
-3. Mark all indexed_events from those blocks as invalidated
-4. WalletService.handleReorg(forkBlock, chain):
-   → UPDATE transactions_blockchain SET status = 'reorged'
-     WHERE block_number >= forkBlock AND status = 'confirmed'
-5. Emit 'reorg.detected' event to Kafka (alerting, downstream consumers)
-6. Re-index from fork point forward with correct chain
-```
-
-**Why this matters:** A naive system would show a user's deposit as "confirmed" after 3 blocks, then silently lose it during a 4-block reorg. This system requires 12 confirmations for finality and actively invalidates + re-processes affected state when reorgs occur.
-
----
 
 ### Double-Spend Prevention
 
-A double-spend occurs when two concurrent requests attempt to debit the same funds simultaneously. Without protection, both could succeed — creating money from nothing.
+Three layers: application validation → `SELECT FOR UPDATE` row locking → serializable isolation (SSI conflict detection). It is physically impossible for two conflicting transactions to both commit.
 
-**How the system prevents it:**
+### DB-Enforced State Machine Transitions
 
-```
-Transaction A (debit account X, $1000)   Transaction B (debit account X, $1000)
-         │                                          │
-         ▼                                          ▼
-  BEGIN SERIALIZABLE                         BEGIN SERIALIZABLE
-  SELECT ... FOR UPDATE (locks balance row)  SELECT ... FOR UPDATE (BLOCKED — waiting)
-  Validate sufficient balance ✓              ... waiting ...
-  INSERT ledger_entry                        ... waiting ...
-  UPDATE balance_cache                       ... waiting ...
-  COMMIT ✓                                   Lock acquired — but now:
-                                             Postgres detects serialization conflict
-                                             → ROLLBACK with error:
-                                             "could not serialize access due to
-                                              concurrent update"
-                                             → Client retries or rejects
+```sql
+-- Example: transactions_blockchain can only go:
+-- pending → signing/failed
+-- signing → submitted/failed
+-- submitted → confirmed/failed/reorged
+-- confirmed → reorged (only)
+-- failed/reorged → (terminal, no transitions)
+
+CREATE TRIGGER trg_tx_state_machine
+  BEFORE UPDATE OF status ON transactions_blockchain
+  FOR EACH ROW EXECUTE FUNCTION enforce_tx_state_machine();
 ```
 
-**Three layers of protection:**
+Similar triggers enforce valid transitions on `settlement_instructions`, `loans`, and `approval_requests`.
 
-| Layer | Mechanism | What it catches |
-|-------|-----------|-----------------|
-| 1. Application | `SUM(debits) == SUM(credits)` validation before DB call | Malformed requests |
-| 2. Database row lock | `SELECT ... FOR UPDATE` on `balance_cache` | Concurrent writes to same account |
-| 3. Serializable isolation | Postgres SSI conflict detection | Phantom reads and write skew across accounts |
+### Dead Letter Queue Recovery
 
-**Result:** It is physically impossible for two conflicting transactions to both commit. One will always fail with a serialization error, which the application surfaces as a 409 Conflict to the caller.
+```
+Outbox publish fails → Message sent to DLQ table + Kafka DLQ topic
+  → Exponential backoff: 1s, 2s, 4s, 8s, 16s
+  → After 5 retries: status = 'exhausted' (requires manual intervention)
+  → Manual reprocess via POST /api/v1/institutional/dlq/:id/reprocess
+```
 
 ## Production Warning
 
-**This project is explicitly NOT suitable for production use.** Blockchain custody infrastructure is among the most security-sensitive systems in financial technology. The following critical components are absent or require hardening:
+**This project is explicitly NOT suitable for production use.** It is a reference implementation for learning and architectural exploration. Critical missing components include:
 
-| Missing Component | Risk if Absent |
-|-------------------|----------------|
-| Hardware Security Module (HSM) integration | Private keys stored in software are vulnerable to extraction |
-| Real MPC threshold signing (FROST / GG20) | Single-point-of-failure key management |
-| TLS termination & mutual authentication | Unencrypted service-to-service communication |
-| Network segmentation & firewalling | Services reachable from unauthorized networks |
-| Security audit & penetration testing | Unknown vulnerabilities in application logic |
-| Backup & disaster recovery procedures | Data loss on hardware failure |
-| Regulatory compliance (BitLicense, MiCA, state MTL) | Legal liability for operating without licenses |
-| SOC 2 / ISO 27001 controls | No formal security controls framework |
-| Production monitoring & alerting (PagerDuty, Datadog) | Incidents go undetected |
-| Key ceremony & rotation procedures | Long-lived keys increase compromise window |
-| Rate limiting & DDoS protection | API abuse and resource exhaustion |
-| Input validation hardening | Injection and malformed data attacks |
-| Multi-region deployment & failover | Single point of failure at infrastructure level |
+- Real HSM/MPC cryptographic integration (signing is stubbed)
+- TLS termination & mutual authentication
+- Network segmentation & firewalling
+- Security audit & penetration testing
+- Backup & disaster recovery procedures
+- Regulatory compliance (BitLicense, MiCA, MTL)
+- SOC 2 / ISO 27001 certification
+- Production monitoring (PagerDuty, Datadog)
+- Multi-region deployment
+- Insurance coverage
 
-> Building a production custody platform requires: licensed money transmission or e-money status, HSM or MPC infrastructure with certified key management, hot/cold wallet segregation, multi-signature approval workflows, real-time chain monitoring, regulatory compliance programs, SOC 2 Type II certification, incident response procedures, and insurance coverage. **Do not use this code to custody, manage, or transfer real digital assets or funds.**
+> **Do not use this code to custody, manage, or transfer real digital assets or funds.**
 
 ## License
 
-This project is licensed under the MIT License.
+MIT License
 
 ---
 
-Built with ❤ ️ by [Pavon Dunbar](https://github.com/pavondunbar)
+Built with ❤️ by [Pavon Dunbar](https://github.com/pavondunbar)

@@ -3,6 +3,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { postJournal, reverseJournal, getBalance } from '../database/ledger-service';
 import { WalletService } from '../wallet/wallet-service';
 import { ChainService } from '../chain/chain-service';
+import { AssetService } from '../tokenization/asset-service';
+import { TokenService } from '../tokenization/token-service';
+import { ComplianceService } from '../tokenization/compliance-service';
+import { CorporateActionsService } from '../tokenization/corporate-actions-service';
+import { createInstitutionalRoutes } from './institutional-routes';
+import { MetricsExporter } from '../monitoring/metrics-exporter';
 import { db } from '../database/connection';
 import { rateLimiter } from '../cache/redis';
 import { logger } from '../config';
@@ -18,6 +24,10 @@ export function createApp() {
 
   const walletService = new WalletService();
   const chainService = new ChainService();
+  const assetService = new AssetService();
+  const tokenService = new TokenService();
+  const complianceService = new ComplianceService();
+  const corporateActionsService = new CorporateActionsService();
 
   // Rate limiting middleware
   app.use(async (req: Request, res: Response, next: NextFunction) => {
@@ -31,6 +41,10 @@ export function createApp() {
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
+
+  // ======================== PROMETHEUS METRICS ========================
+  const metricsExporter = new MetricsExporter();
+  app.get('/metrics', metricsExporter.handler());
 
   // ======================== ACCOUNTS ========================
   app.get('/api/v1/accounts', async (req: Request, res: Response) => {
@@ -253,6 +267,441 @@ export function createApp() {
     const result = await db.query('SELECT * FROM reconciliation_runs ORDER BY started_at DESC LIMIT 20');
     res.json({ runs: result.rows });
   });
+
+  // ======================== ASSETS ========================
+  app.post('/api/v1/assets', async (req: Request, res: Response) => {
+    try {
+      const { externalId, assetType, name, description, issuerId, valuation, valuationCurrency, jurisdiction, legalDocRefs, metadata } = req.body;
+      if (!externalId || !assetType || !name || !issuerId) {
+        return res.status(400).json({ error: 'externalId, assetType, name, and issuerId are required' });
+      }
+      const id = await assetService.createAsset({
+        externalId, assetType, name, description, issuerId,
+        valuation: valuation ? BigInt(valuation) : undefined,
+        valuationCurrency, jurisdiction, legalDocRefs, metadata,
+      });
+      res.status(201).json({ assetId: id });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      if (msg.includes('duplicate key')) {
+        return res.status(409).json({ error: 'Asset with this externalId already exists' });
+      }
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.get('/api/v1/assets', async (req: Request, res: Response) => {
+    try {
+      const result = await assetService.listAssets({
+        assetType: req.query.assetType ? String(req.query.assetType) : undefined,
+        status: req.query.status ? String(req.query.status) : undefined,
+        limit: req.query.limit ? parseInt(String(req.query.limit)) : undefined,
+        offset: req.query.offset ? parseInt(String(req.query.offset)) : undefined,
+      });
+      res.json(result);
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.get('/api/v1/assets/:id', async (req: Request, res: Response) => {
+    const asset = await assetService.getAsset(param(req, 'id'));
+    if (!asset) return res.status(404).json({ error: 'Asset not found' });
+    res.json(asset);
+  });
+
+  app.put('/api/v1/assets/:id/valuation', async (req: Request, res: Response) => {
+    try {
+      const { valuation, currency } = req.body;
+      if (!valuation || !currency) {
+        return res.status(400).json({ error: 'valuation and currency are required' });
+      }
+      await assetService.updateValuation(param(req, 'id'), BigInt(valuation), currency);
+      res.json({ status: 'updated' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/assets/:id/activate', async (req: Request, res: Response) => {
+    try {
+      await assetService.activateAsset(param(req, 'id'));
+      res.json({ status: 'activated' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/assets/:id/suspend', async (req: Request, res: Response) => {
+    try {
+      await assetService.suspendAsset(param(req, 'id'));
+      res.json({ status: 'suspended' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  // ======================== TOKENS ========================
+  app.post('/api/v1/tokens', async (req: Request, res: Response) => {
+    try {
+      const { assetId, symbol, name, tokenStandard, decimals, maxSupply, contractAddress, chain, treasuryCurrency, metadata } = req.body;
+      if (!symbol || !name || !tokenStandard || !treasuryCurrency) {
+        return res.status(400).json({ error: 'symbol, name, tokenStandard, and treasuryCurrency are required' });
+      }
+      const id = await tokenService.createToken({
+        assetId, symbol, name, tokenStandard, decimals,
+        maxSupply: maxSupply ? BigInt(maxSupply) : undefined,
+        contractAddress, chain, treasuryCurrency, metadata,
+      });
+      res.status(201).json({ tokenId: id });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.get('/api/v1/tokens', async (req: Request, res: Response) => {
+    try {
+      const result = await tokenService.listTokens({
+        status: req.query.status ? String(req.query.status) : undefined,
+        assetId: req.query.assetId ? String(req.query.assetId) : undefined,
+        limit: req.query.limit ? parseInt(String(req.query.limit)) : undefined,
+        offset: req.query.offset ? parseInt(String(req.query.offset)) : undefined,
+      });
+      res.json(result);
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.get('/api/v1/tokens/:id', async (req: Request, res: Response) => {
+    const token = await tokenService.getToken(param(req, 'id'));
+    if (!token) return res.status(404).json({ error: 'Token not found' });
+    res.json(token);
+  });
+
+  app.post('/api/v1/tokens/:id/activate', async (req: Request, res: Response) => {
+    try {
+      await tokenService.activateToken(param(req, 'id'));
+      res.json({ status: 'activated' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/pause', async (req: Request, res: Response) => {
+    try {
+      await tokenService.pauseToken(param(req, 'id'));
+      res.json({ status: 'paused' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/mint', async (req: Request, res: Response) => {
+    try {
+      const { toAccountId, amount, holderAddress, operatorId, reason, idempotencyKey } = req.body;
+      if (!toAccountId || !amount || !idempotencyKey) {
+        return res.status(400).json({ error: 'toAccountId, amount, and idempotencyKey are required' });
+      }
+      const result = await tokenService.mint({
+        tokenId: param(req, 'id'), toAccountId,
+        amount: BigInt(amount), holderAddress, operatorId, reason, idempotencyKey,
+      });
+      res.status(201).json({
+        journalEntryId: result.journalEntryId,
+        entries: result.entries.map(e => ({ ...e, amount: e.amount.toString() })),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/burn', async (req: Request, res: Response) => {
+    try {
+      const { fromAccountId, amount, operatorId, reason, idempotencyKey } = req.body;
+      if (!fromAccountId || !amount || !idempotencyKey) {
+        return res.status(400).json({ error: 'fromAccountId, amount, and idempotencyKey are required' });
+      }
+      const result = await tokenService.burn({
+        tokenId: param(req, 'id'), fromAccountId,
+        amount: BigInt(amount), operatorId, reason, idempotencyKey,
+      });
+      res.json({
+        journalEntryId: result.journalEntryId,
+        entries: result.entries.map(e => ({ ...e, amount: e.amount.toString() })),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/transfer', async (req: Request, res: Response) => {
+    try {
+      const { fromAccountId, toAccountId, amount, operatorId, reason, idempotencyKey } = req.body;
+      if (!fromAccountId || !toAccountId || !amount || !idempotencyKey) {
+        return res.status(400).json({ error: 'fromAccountId, toAccountId, amount, and idempotencyKey are required' });
+      }
+      const result = await tokenService.transfer({
+        tokenId: param(req, 'id'), fromAccountId, toAccountId,
+        amount: BigInt(amount), operatorId, reason, idempotencyKey,
+      });
+      res.json({
+        journalEntryId: result.journalEntryId,
+        entries: result.entries.map(e => ({ ...e, amount: e.amount.toString() })),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/freeze', async (req: Request, res: Response) => {
+    try {
+      const { accountId, operatorId, reason } = req.body;
+      if (!accountId) return res.status(400).json({ error: 'accountId is required' });
+      await tokenService.freezeHolder({
+        tokenId: param(req, 'id'), accountId, operatorId, reason,
+      });
+      res.json({ status: 'frozen' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/unfreeze', async (req: Request, res: Response) => {
+    try {
+      const { accountId, operatorId, reason } = req.body;
+      if (!accountId) return res.status(400).json({ error: 'accountId is required' });
+      await tokenService.unfreezeHolder({
+        tokenId: param(req, 'id'), accountId, operatorId, reason,
+      });
+      res.json({ status: 'unfrozen' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  // ======================== CAP TABLE ========================
+  app.get('/api/v1/tokens/:id/holders', async (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(String(req.query.limit) || '50');
+      const offset = parseInt(String(req.query.offset) || '0');
+      const result = await tokenService.getHolders(param(req, 'id'), limit, offset);
+      res.json(result);
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.get('/api/v1/tokens/:id/holders/:accountId', async (req: Request, res: Response) => {
+    const holder = await tokenService.getHolderBalance(param(req, 'id'), param(req, 'accountId'));
+    if (!holder) return res.status(404).json({ error: 'Holder not found' });
+    res.json(holder);
+  });
+
+  app.get('/api/v1/tokens/:id/operations', async (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(String(req.query.limit) || '50');
+      const offset = parseInt(String(req.query.offset) || '0');
+      const result = await tokenService.getOperationHistory(param(req, 'id'), limit, offset);
+      res.json(result);
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // ======================== COMPLIANCE ========================
+  app.post('/api/v1/tokens/:id/restrictions', async (req: Request, res: Response) => {
+    try {
+      const { restrictionType, config } = req.body;
+      if (!restrictionType || !config) {
+        return res.status(400).json({ error: 'restrictionType and config are required' });
+      }
+      const id = await complianceService.addRestriction({
+        tokenId: param(req, 'id'), restrictionType, config,
+      });
+      res.status(201).json({ restrictionId: id });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.get('/api/v1/tokens/:id/restrictions', async (req: Request, res: Response) => {
+    try {
+      const restrictions = await complianceService.getRestrictions(param(req, 'id'));
+      res.json({ restrictions });
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.delete('/api/v1/tokens/:tokenId/restrictions/:restrictionId', async (req: Request, res: Response) => {
+    try {
+      await complianceService.removeRestriction(param(req, 'restrictionId'));
+      res.json({ status: 'removed' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/whitelist', async (req: Request, res: Response) => {
+    try {
+      const { address, validFrom, validUntil } = req.body;
+      if (!address) return res.status(400).json({ error: 'address is required' });
+      const id = await complianceService.addWhitelistEntry({
+        tokenId: param(req, 'id'), address,
+        validFrom: validFrom ? new Date(validFrom) : undefined,
+        validUntil: validUntil ? new Date(validUntil) : undefined,
+      });
+      res.status(201).json({ whitelistEntryId: id });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/v1/tokens/:tokenId/whitelist/:address', async (req: Request, res: Response) => {
+    try {
+      await complianceService.removeWhitelistEntry(param(req, 'tokenId'), param(req, 'address'));
+      res.json({ status: 'removed' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.get('/api/v1/tokens/:id/whitelist', async (req: Request, res: Response) => {
+    try {
+      const entries = await complianceService.getWhitelistEntries(param(req, 'id'));
+      res.json({ entries });
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.post('/api/v1/tokens/:id/compliance-check', async (req: Request, res: Response) => {
+    try {
+      const { fromAccountId, toAccountId, amount } = req.body;
+      if (!amount) return res.status(400).json({ error: 'amount is required' });
+      const result = await complianceService.checkCompliance(
+        param(req, 'id'),
+        fromAccountId || null,
+        toAccountId || null,
+        BigInt(amount),
+      );
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  // ======================== CORPORATE ACTIONS ========================
+  app.post('/api/v1/tokens/:id/actions', async (req: Request, res: Response) => {
+    try {
+      const { actionType, title, description, perTokenAmount, voteOptions, metadata } = req.body;
+      if (!actionType || !title) {
+        return res.status(400).json({ error: 'actionType and title are required' });
+      }
+      const id = await corporateActionsService.createAction({
+        tokenId: param(req, 'id'), actionType, title, description,
+        perTokenAmount: perTokenAmount ? BigInt(perTokenAmount) : undefined,
+        voteOptions, metadata,
+      });
+      res.status(201).json({ actionId: id });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.get('/api/v1/tokens/:id/actions', async (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(String(req.query.limit) || '50');
+      const offset = parseInt(String(req.query.offset) || '0');
+      const result = await corporateActionsService.listActions(param(req, 'id'), limit, offset);
+      res.json(result);
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.get('/api/v1/actions/:id', async (req: Request, res: Response) => {
+    const action = await corporateActionsService.getAction(param(req, 'id'));
+    if (!action) return res.status(404).json({ error: 'Corporate action not found' });
+    res.json(action);
+  });
+
+  app.post('/api/v1/actions/:id/set-record', async (req: Request, res: Response) => {
+    try {
+      const holderCount = await corporateActionsService.setRecordDate(param(req, 'id'));
+      res.json({ status: 'record_set', holdersSnapshot: holderCount });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/actions/:id/process', async (req: Request, res: Response) => {
+    try {
+      const processed = await corporateActionsService.processDistributions(param(req, 'id'));
+      res.json({ status: 'completed', processed });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/actions/:id/vote', async (req: Request, res: Response) => {
+    try {
+      const { accountId, voteChoice } = req.body;
+      if (!accountId || !voteChoice) {
+        return res.status(400).json({ error: 'accountId and voteChoice are required' });
+      }
+      await corporateActionsService.castVote({
+        actionId: param(req, 'id'), accountId, voteChoice,
+      });
+      res.json({ status: 'voted' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.get('/api/v1/actions/:id/results', async (req: Request, res: Response) => {
+    try {
+      const results = await corporateActionsService.getActionResults(param(req, 'id'));
+      res.json(results);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/v1/actions/:id/cancel', async (req: Request, res: Response) => {
+    try {
+      await corporateActionsService.cancelAction(param(req, 'id'));
+      res.json({ status: 'cancelled' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  // ======================== INSTITUTIONAL CONTROLS ========================
+  app.use('/api/v1/institutional', createInstitutionalRoutes());
 
   // Error handler
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
