@@ -8,6 +8,9 @@ export const config = {
     user: process.env.PG_USER || 'app_writer',
     password: process.env.PG_PASSWORD || 'password',
     max: parseInt(process.env.PG_POOL_MAX || '20'),
+    sslEnabled: process.env.PG_SSL === 'true',
+    sslRejectUnauthorized: process.env.PG_SSL_REJECT_UNAUTHORIZED !== 'false',
+    sslCaPath: process.env.PG_SSL_CA_PATH || '',
   },
   redis: {
     host: process.env.REDIS_HOST || 'localhost',
@@ -25,6 +28,13 @@ export const config = {
   },
   server: {
     port: parseInt(process.env.PORT || '3000'),
+  },
+  tls: {
+    enabled: process.env.TLS_ENABLED === 'true',
+    certPath: process.env.TLS_CERT_PATH || '/etc/certs/server.crt',
+    keyPath: process.env.TLS_KEY_PATH || '/etc/certs/server.key',
+    caPath: process.env.TLS_CA_PATH || '/etc/certs/ca.crt',
+    mtlsEnabled: process.env.MTLS_ENABLED === 'true',
   },
 };
 

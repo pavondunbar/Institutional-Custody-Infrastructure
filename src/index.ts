@@ -6,6 +6,8 @@ import { BlockIndexer, EventProcessor, IndexedEvent } from './indexer/block-inde
 import { ReconciliationService } from './reconciliation/reconciliation-service';
 import { createApp } from './api/app';
 import { id as ethersId } from 'ethers';
+import { createServer as createHttpsServer } from 'https';
+import { readFileSync, existsSync } from 'fs';
 
 // ERC-20 Transfer(address,address,uint256) event signature
 const ERC20_TRANSFER_SIG = ethersId('Transfer(address,address,uint256)');
@@ -15,9 +17,29 @@ async function main() {
 
   // Start API server
   const app = createApp();
-  app.listen(config.server.port, () => {
-    logger.info({ port: config.server.port }, 'API server listening');
-  });
+
+  if (config.tls.enabled) {
+    if (!existsSync(config.tls.certPath) || !existsSync(config.tls.keyPath)) {
+      logger.fatal('TLS enabled but cert/key files not found');
+      process.exit(1);
+    }
+    const tlsOptions: Record<string, unknown> = {
+      cert: readFileSync(config.tls.certPath),
+      key: readFileSync(config.tls.keyPath),
+    };
+    if (config.tls.mtlsEnabled && existsSync(config.tls.caPath)) {
+      tlsOptions.ca = readFileSync(config.tls.caPath);
+      tlsOptions.requestCert = true;
+      tlsOptions.rejectUnauthorized = true;
+    }
+    createHttpsServer(tlsOptions, app).listen(config.server.port, () => {
+      logger.info({ port: config.server.port, tls: true, mtls: config.tls.mtlsEnabled }, 'HTTPS server listening');
+    });
+  } else {
+    app.listen(config.server.port, () => {
+      logger.info({ port: config.server.port }, 'API server listening (no TLS)');
+    });
+  }
 
   // Start outbox relay (publishes to Kafka)
   const relay = new OutboxRelay();

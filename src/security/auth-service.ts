@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
+import * as argon2 from 'argon2';
 import { Request, Response, NextFunction } from 'express';
 import { db } from '../database/connection';
 import { logger } from '../config';
@@ -32,14 +33,35 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-function hashPassword(password: string, salt: string): string {
-  return createHash('sha256')
-    .update(`${salt}:${password}`)
-    .digest('hex');
+// Argon2id parameters following OWASP recommendations
+const ARGON2_OPTIONS: argon2.Options & { raw?: false } = {
+  type: argon2.argon2id,
+  memoryCost: 65536,    // 64 MiB
+  timeCost: 3,          // 3 iterations
+  parallelism: 4,       // 4 threads
+};
+
+async function hashPasswordArgon2(password: string): Promise<string> {
+  return argon2.hash(password, ARGON2_OPTIONS);
 }
 
-function generateSalt(): string {
-  return randomBytes(32).toString('hex');
+async function verifyPasswordArgon2(hash: string, password: string): Promise<boolean> {
+  return argon2.verify(hash, password);
+}
+
+/** Legacy SHA-256 verification for migration from old hashes */
+function verifyLegacySha256(storedHash: string, password: string): boolean {
+  const [salt, hash] = storedHash.split(':');
+  if (!salt || !hash) return false;
+  const attempt = createHash('sha256').update(`${salt}:${password}`).digest('hex');
+  const storedBuf = Buffer.from(hash, 'hex');
+  const attemptBuf = Buffer.from(attempt, 'hex');
+  if (storedBuf.length !== attemptBuf.length) return false;
+  return timingSafeEqual(storedBuf, attemptBuf);
+}
+
+function isArgon2Hash(hash: string): boolean {
+  return hash.startsWith('$argon2');
 }
 
 export class AuthService {
@@ -48,8 +70,7 @@ export class AuthService {
     password: string,
     displayName: string,
   ): Promise<string> {
-    const salt = generateSalt();
-    const passwordHash = `${salt}:${hashPassword(password, salt)}`;
+    const passwordHash = await hashPasswordArgon2(password);
 
     const result = await db.query(
       `INSERT INTO users (email, password_hash, display_name)
@@ -81,14 +102,24 @@ export class AuthService {
       return null;
     }
 
-    const [salt, storedHash] = user.password_hash.split(':');
-    const attemptHash = hashPassword(password, salt);
+    // Verify password: supports both argon2id (new) and legacy SHA-256 hashes
+    let passwordValid = false;
+    if (isArgon2Hash(user.password_hash)) {
+      passwordValid = await verifyPasswordArgon2(user.password_hash, password);
+    } else {
+      // Legacy SHA-256 verification with transparent upgrade to argon2id
+      passwordValid = verifyLegacySha256(user.password_hash, password);
+      if (passwordValid) {
+        const upgradedHash = await hashPasswordArgon2(password);
+        await db.query(
+          `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+          [upgradedHash, user.id]
+        );
+        logger.info({ userId: user.id }, 'Password hash upgraded from SHA-256 to Argon2id');
+      }
+    }
 
-    const storedBuf = Buffer.from(storedHash, 'hex');
-    const attemptBuf = Buffer.from(attemptHash, 'hex');
-
-    if (storedBuf.length !== attemptBuf.length ||
-        !timingSafeEqual(storedBuf, attemptBuf)) {
+    if (!passwordValid) {
       await db.query(
         `UPDATE users SET failed_login_attempts = failed_login_attempts + 1,
          updated_at = NOW() WHERE id = $1`,

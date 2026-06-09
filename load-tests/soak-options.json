@@ -1,0 +1,18 @@
+{
+  "scenarios": {
+    "soak": {
+      "executor": "constant-arrival-rate",
+      "exec": "soak",
+      "rate": 5000,
+      "timeUnit": "1s",
+      "duration": "72h",
+      "preAllocatedVUs": 500,
+      "maxVUs": 2000
+    }
+  },
+  "thresholds": {
+    "http_req_duration": ["p(95)<1000", "p(99)<3000"],
+    "errors": ["rate<0.005"],
+    "http_req_failed": ["rate<0.005"]
+  }
+}

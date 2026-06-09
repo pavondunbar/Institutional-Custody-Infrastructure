@@ -1,5 +1,15 @@
 import { Pool, PoolClient } from 'pg';
 import { config, logger } from '../config';
+import { readFileSync, existsSync } from 'fs';
+
+const sslConfig = config.postgres.sslEnabled ? {
+  ssl: {
+    rejectUnauthorized: config.postgres.sslRejectUnauthorized,
+    ...(config.postgres.sslCaPath && existsSync(config.postgres.sslCaPath)
+      ? { ca: readFileSync(config.postgres.sslCaPath).toString() }
+      : {}),
+  },
+} : {};
 
 export const db = new Pool({
   host: config.postgres.host,
@@ -8,6 +18,10 @@ export const db = new Pool({
   user: config.postgres.user,
   password: config.postgres.password,
   max: config.postgres.max,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
+  statement_timeout: 60_000,
+  ...sslConfig,
 });
 
 db.on('error', (err) => {

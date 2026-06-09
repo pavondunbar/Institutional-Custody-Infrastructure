@@ -16,6 +16,18 @@ import { DLQService } from '../messaging/dlq-service';
 import { PriceOracleService } from '../oracle/price-oracle-service';
 import { LendingService } from '../lending/lending-service';
 import { FXService } from '../fx/fx-service';
+import { CryptoCustodyService } from '../custody/crypto-custody-service';
+import { RwaTokenizationService } from '../rwa/rwa-tokenization-service';
+import { DvpSettlementService } from '../settlement/dvp-settlement-service';
+import { CcpClearinghouseService } from '../clearing/ccp-clearinghouse-service';
+import { LendingExtensionsService } from '../lending/lending-extensions-service';
+import { StablecoinService } from '../stablecoin/stablecoin-service';
+import { PermissionedDefiService } from '../defi/permissioned-defi-service';
+import { OnchainComplianceService } from '../compliance/onchain-compliance-service';
+import { TokenizedFundNavService } from '../fund/tokenized-fund-service';
+import { DigitalBondService } from '../bond/digital-bond-service';
+import { BitcoinEtfService } from '../etf/bitcoin-etf-service';
+import { UnbankedInfraService } from '../unbanked/unbanked-infra-service';
 import { logger } from '../config';
 
 function param(req: Request, name: string): string {
@@ -625,6 +637,290 @@ export function createInstitutionalRoutes(): Router {
   router.get('/fx/pairs', async (_req: Request, res: Response) => {
     try { res.json({ pairs: await fxService.getSupportedPairs() }); }
     catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+
+  // === Crypto Custody ===
+  const custodyService = new CryptoCustodyService();
+  router.post('/custody/multisig-policies', async (req: Request, res: Response) => {
+    try { res.json(await custodyService.createMultiSigPolicy(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/custody/whitelist', async (req: Request, res: Response) => {
+    try { res.json(await custodyService.addToWhitelist(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/custody/whitelist/:id/approve', async (req: Request, res: Response) => {
+    try { await custodyService.approveWhitelistEntry(param(req, 'id'), req.body.approvedBy); res.json({ status: 'approved' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/custody/cold-storage/transfers', async (req: Request, res: Response) => {
+    try { res.json(await custodyService.initiateColdStorageTransfer(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/custody/cold-storage/transfers/:id/sign', async (req: Request, res: Response) => {
+    try { res.json(await custodyService.signColdStorageTransfer(param(req, 'id'), req.body.signerId)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === RWA Tokenization ===
+  const rwaService = new RwaTokenizationService();
+  router.post('/rwa/accreditations', async (req: Request, res: Response) => {
+    try { res.json(await rwaService.submitAccreditation(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/rwa/accreditations/:id/verify', async (req: Request, res: Response) => {
+    try { await rwaService.verifyAccreditation(param(req, 'id'), req.body.verifiedBy); res.json({ status: 'verified' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/rwa/eligibility/:investorId/:assetId', async (req: Request, res: Response) => {
+    try { res.json(await rwaService.checkInvestorEligibility(param(req, 'investorId'), param(req, 'assetId'))); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+  router.post('/rwa/verifications', async (req: Request, res: Response) => {
+    try { res.json(await rwaService.submitAssetVerification(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === DvP Settlement Extensions ===
+  const dvpService = new DvpSettlementService();
+  router.post('/settlements/:id/partial', async (req: Request, res: Response) => {
+    try { res.json(await dvpService.executePartialSettlement(param(req, 'id'), req.body.percentage)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/settlements/:id/buy-in', async (req: Request, res: Response) => {
+    try { res.json(await dvpService.initiateFailureHandling(param(req, 'id'))); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/settlements/buy-ins/:id/execute', async (req: Request, res: Response) => {
+    try { await dvpService.executeBuyIn(param(req, 'id'), req.body.marketPrice); res.json({ status: 'executed' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === CCP Clearinghouse ===
+  const ccpService = new CcpClearinghouseService();
+  router.post('/clearing/members', async (req: Request, res: Response) => {
+    try { res.json(await ccpService.onboardMember(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/clearing/members/:id/margin', async (req: Request, res: Response) => {
+    try { await ccpService.postMargin(param(req, 'id'), req.body.marginType, req.body.amount); res.json({ status: 'posted' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/clearing/members/:id/check-limit', async (req: Request, res: Response) => {
+    try { res.json(await ccpService.checkPositionLimit(param(req, 'id'), req.body.additionalExposure)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/clearing/default-waterfall/:id', async (req: Request, res: Response) => {
+    try { res.json(await ccpService.executeDefaultWaterfall(param(req, 'id'))); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/clearing/stress-test', async (req: Request, res: Response) => {
+    try { res.json(await ccpService.runStressTest(req.body.scenarioName, req.body.shockPct)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === Lending Extensions ===
+  const lendingExt = new LendingExtensionsService();
+  router.get('/lending/haircuts', async (req: Request, res: Response) => {
+    try { res.json(await lendingExt.getHaircutSchedule(req.query.asset as string)); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+  router.post('/lending/haircuts', async (req: Request, res: Response) => {
+    try { await lendingExt.setHaircut(req.body.asset, req.body.haircutPct, req.body.volatilityTier); res.json({ status: 'set' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/lending/loans/:id/collateral', async (req: Request, res: Response) => {
+    try { res.json(await lendingExt.addCollateralToBasket(param(req, 'id'), req.body.asset, req.body.amount)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/lending/loans/:id/partial-liquidate', async (req: Request, res: Response) => {
+    try { res.json(await lendingExt.executePartialLiquidation(param(req, 'id'), req.body.percentage)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/lending/rate-curves', async (req: Request, res: Response) => {
+    try { const id = await lendingExt.setInterestRateCurve(req.body); res.json({ id }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/lending/syndications', async (req: Request, res: Response) => {
+    try { res.json(await lendingExt.createSyndicatedLoan(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === Stablecoin ===
+  const stablecoinService = new StablecoinService();
+  router.post('/stablecoin/mint', async (req: Request, res: Response) => {
+    try { res.json(await stablecoinService.requestMint(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/stablecoin/redeem', async (req: Request, res: Response) => {
+    try { res.json(await stablecoinService.requestRedemption(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/stablecoin/operations/:id/process', async (req: Request, res: Response) => {
+    try { await stablecoinService.processOperation(param(req, 'id')); res.json({ status: 'completed' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/stablecoin/peg', async (_req: Request, res: Response) => {
+    try { res.json(await stablecoinService.getPegStatus()); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+  router.post('/stablecoin/peg/update', async (req: Request, res: Response) => {
+    try { res.json(await stablecoinService.updatePegPrice(req.body.currentPrice)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/stablecoin/yield/distribute', async (req: Request, res: Response) => {
+    try { res.json(await stablecoinService.distributeYield({ ...req.body, periodStart: new Date(req.body.periodStart), periodEnd: new Date(req.body.periodEnd) })); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === Permissioned DeFi ===
+  const defiService = new PermissionedDefiService();
+  router.post('/defi/credentials', async (req: Request, res: Response) => {
+    try { res.json(await defiService.issueCredential(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/defi/credentials/:id/verify', async (req: Request, res: Response) => {
+    try { res.json(await defiService.verifyCredential(param(req, 'id'))); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+  router.post('/defi/credentials/:id/revoke', async (req: Request, res: Response) => {
+    try { await defiService.revokeCredential(param(req, 'id'), req.body.reason); res.json({ status: 'revoked' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/defi/pools/policies', async (req: Request, res: Response) => {
+    try { res.json(await defiService.createPoolAccessPolicy(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/defi/pools/:poolId/access/:holderId', async (req: Request, res: Response) => {
+    try { res.json(await defiService.checkPoolAccess(param(req, 'holderId'), param(req, 'poolId'))); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+
+  // === Onchain Compliance ===
+  const complianceExt = new OnchainComplianceService();
+  router.post('/compliance/graph-analysis', async (req: Request, res: Response) => {
+    try { res.json(await complianceExt.analyzeTransactionGraph(req.body.address, req.body.maxHops)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/compliance/jurisdiction-rules', async (req: Request, res: Response) => {
+    try { res.json(await complianceExt.setJurisdictionRule(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/compliance/jurisdiction-check', async (req: Request, res: Response) => {
+    try { res.json(await complianceExt.evaluateJurisdictionRules(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/compliance/reports', async (req: Request, res: Response) => {
+    try { res.json(await complianceExt.generateRegulatoryReport({ ...req.body, periodStart: new Date(req.body.periodStart), periodEnd: new Date(req.body.periodEnd) })); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/compliance/reports', async (req: Request, res: Response) => {
+    try { res.json(await complianceExt.getReports(req.query.jurisdiction as string, req.query.status as string)); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+
+  // === Tokenized Fund NAV ===
+  const fundService = new TokenizedFundNavService();
+  router.post('/funds/windows', async (req: Request, res: Response) => {
+    try { res.json(await fundService.createWindow({ ...req.body, opensAt: new Date(req.body.opensAt), closesAt: new Date(req.body.closesAt), settlementDate: new Date(req.body.settlementDate) })); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/funds/orders', async (req: Request, res: Response) => {
+    try { res.json(await fundService.submitOrder(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/funds/windows/:id/settle', async (req: Request, res: Response) => {
+    try { res.json(await fundService.settleWindow(param(req, 'id'), req.body.navPerShare)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/funds/performance-fee', async (req: Request, res: Response) => {
+    try { res.json(await fundService.calculatePerformanceFee(req.body.fundId, new Date(req.body.periodEnd), req.body.hurdleRateBps, req.body.feeRateBps)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/funds/:fundId/statements/:investorId', async (req: Request, res: Response) => {
+    try { res.json(await fundService.generateInvestorStatement(param(req, 'investorId'), param(req, 'fundId'))); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+
+  // === Digital Bonds ===
+  const bondService = new DigitalBondService();
+  router.post('/bonds/terms', async (req: Request, res: Response) => {
+    try { res.json(await bondService.createBondTerms({ ...req.body, issueDate: new Date(req.body.issueDate), maturityDate: new Date(req.body.maturityDate) })); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/bonds/:bondId/coupons/generate', async (req: Request, res: Response) => {
+    try { res.json(await bondService.generateCouponSchedule(param(req, 'bondId'))); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/bonds/accrued-interest', async (req: Request, res: Response) => {
+    try { res.json(bondService.calculateAccruedInterest({ ...req.body, lastCouponDate: new Date(req.body.lastCouponDate), settlementDate: new Date(req.body.settlementDate), nextCouponDate: new Date(req.body.nextCouponDate) })); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/bonds/:bondId/call-provision', async (req: Request, res: Response) => {
+    try { res.json(await bondService.evaluateCallProvision(param(req, 'bondId'), new Date())); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+  router.post('/bonds/:bondId/credit-event', async (req: Request, res: Response) => {
+    try { await bondService.recordCreditEvent(param(req, 'bondId'), req.body.eventType, req.body.details || {}); res.json({ status: 'recorded' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === Bitcoin ETF ===
+  const etfService = new BitcoinEtfService();
+  router.post('/etf/utxos', async (req: Request, res: Response) => {
+    try { res.json(await etfService.registerUtxo(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/etf/utxos', async (req: Request, res: Response) => {
+    try { res.json(await etfService.getUtxoSet(parseInt(req.query.minConfirmations as string) || 6)); }
+    catch (err: unknown) { res.status(500).json({ error: 'Internal error' }); }
+  });
+  router.post('/etf/baskets/creation', async (req: Request, res: Response) => {
+    try { res.json(await etfService.submitCreationBasket(req.body.apId, req.body.btcAmount, req.body.navPerShare)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/etf/baskets/redemption', async (req: Request, res: Response) => {
+    try { res.json(await etfService.submitRedemptionBasket(req.body.apId, req.body.sharesAmount, req.body.navPerShare)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/etf/baskets/:id/approve', async (req: Request, res: Response) => {
+    try { await etfService.approveBasket(param(req, 'id'), req.body.approvedBy); res.json({ status: 'approved' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/etf/baskets/:id/settle', async (req: Request, res: Response) => {
+    try { await etfService.settleBasket(param(req, 'id')); res.json({ status: 'settled' }); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/etf/inav', async (req: Request, res: Response) => {
+    try { res.json(await etfService.calculateIntradayNav(req.body.fundId, req.body.btcPrice)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/etf/reconcile', async (req: Request, res: Response) => {
+    try { res.json(await etfService.reconcileFundAccounting(req.body.fundId)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+
+  // === Unbanked/Underbanked ===
+  const unbankedService = new UnbankedInfraService();
+  router.post('/unbanked/profiles', async (req: Request, res: Response) => {
+    try { res.json(await unbankedService.createProfile(req.body.userId, req.body.phoneVerified)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/unbanked/verify', async (req: Request, res: Response) => {
+    try { res.json(await unbankedService.submitVerification(req.body.userId, req.body.verificationType)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/unbanked/corridors', async (req: Request, res: Response) => {
+    try { res.json(await unbankedService.createCorridor(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.post('/unbanked/remittances', async (req: Request, res: Response) => {
+    try { res.json(await unbankedService.initiateRemittance(req.body)); }
+    catch (err: unknown) { res.status(400).json({ error: err instanceof Error ? err.message : 'Unknown error' }); }
+  });
+  router.get('/unbanked/balance/:userId', async (req: Request, res: Response) => {
+    try { res.set('Content-Type', 'text/plain').send(await unbankedService.getBalanceUssd(param(req, 'userId'))); }
+    catch (err: unknown) { res.status(500).send('ERR'); }
   });
 
   return router;

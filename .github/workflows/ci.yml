@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -6,12 +6,44 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: custody-infrastructure
+  ECS_CLUSTER_STAGING: custody-staging
+  ECS_SERVICE_STAGING: custody-app
+  ECS_CLUSTER_PROD: custody-production
+  ECS_SERVICE_PROD: custody-app
+
 jobs:
-  build-and-test:
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         node-version: [20, 22]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: tradfi_web3
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -31,5 +63,153 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Run migrations
+        run: npm run migrate
+        env:
+          PG_HOST: localhost
+          PG_USER: postgres
+          PG_PASSWORD: postgres
+          PG_DATABASE: tradfi_web3
+
       - name: Test
         run: npm test
+        env:
+          PG_HOST: localhost
+          PG_USER: postgres
+          PG_PASSWORD: postgres
+          PG_DATABASE: tradfi_web3
+          REDIS_HOST: localhost
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: npm ci
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+  build-image:
+    needs: [test, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy-staging:
+    needs: build-image
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging-custody.example.com/health
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to staging
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER_STAGING \
+            --service $ECS_SERVICE_STAGING \
+            --force-new-deployment \
+            --region $AWS_REGION
+
+      - name: Wait for stable deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER_STAGING \
+            --services $ECS_SERVICE_STAGING \
+            --region $AWS_REGION
+
+      - name: Smoke test staging
+        run: |
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://staging-custody.example.com/health || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Staging healthy"
+              exit 0
+            fi
+            echo "Waiting for staging... (attempt $i)"
+            sleep 10
+          done
+          echo "Staging health check failed"
+          exit 1
+
+      - name: Run integration tests against staging
+        run: |
+          npm ci
+          npm run build
+          BASE_URL=https://staging-custody.example.com npm test
+        env:
+          PG_HOST: ${{ secrets.STAGING_PG_HOST }}
+          PG_USER: ${{ secrets.STAGING_PG_USER }}
+          PG_PASSWORD: ${{ secrets.STAGING_PG_PASSWORD }}
+          PG_DATABASE: tradfi_web3
+
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://custody.example.com/health
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to production
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER_PROD \
+            --service $ECS_SERVICE_PROD \
+            --force-new-deployment \
+            --region $AWS_REGION
+
+      - name: Wait for stable deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER_PROD \
+            --services $ECS_SERVICE_PROD \
+            --region $AWS_REGION
+
+      - name: Production health check
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://custody.example.com/health)
+          if [ "$STATUS" != "200" ]; then
+            echo "Production health check failed (status: $STATUS)"
+            exit 1
+          fi
+          echo "Production deployment verified"
