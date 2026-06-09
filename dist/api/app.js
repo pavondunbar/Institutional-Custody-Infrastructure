@@ -13,6 +13,9 @@ const asset_service_1 = require("../tokenization/asset-service");
 const token_service_1 = require("../tokenization/token-service");
 const compliance_service_1 = require("../tokenization/compliance-service");
 const corporate_actions_service_1 = require("../tokenization/corporate-actions-service");
+const institutional_routes_1 = require("./institutional-routes");
+const auth_routes_1 = require("./auth-routes");
+const metrics_exporter_1 = require("../monitoring/metrics-exporter");
 const connection_1 = require("../database/connection");
 const redis_1 = require("../cache/redis");
 const config_1 = require("../config");
@@ -41,6 +44,9 @@ function createApp() {
     app.get('/health', (_req, res) => {
         res.json({ status: 'ok', timestamp: new Date().toISOString() });
     });
+    // ======================== PROMETHEUS METRICS ========================
+    const metricsExporter = new metrics_exporter_1.MetricsExporter();
+    app.get('/metrics', metricsExporter.handler());
     // ======================== ACCOUNTS ========================
     app.get('/api/v1/accounts', async (req, res) => {
         try {
@@ -681,6 +687,10 @@ function createApp() {
             res.status(400).json({ error: msg });
         }
     });
+    // ======================== INSTITUTIONAL CONTROLS ========================
+    app.use('/api/v1/institutional', (0, institutional_routes_1.createInstitutionalRoutes)());
+    // ======================== AUTH / IAM ========================
+    app.use('/api/v1/auth', (0, auth_routes_1.createAuthRoutes)());
     // Error handler
     app.use((err, _req, res, _next) => {
         config_1.logger.error(err, 'Unhandled API error');

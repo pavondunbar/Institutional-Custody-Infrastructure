@@ -1,9 +1,10 @@
 /**
  * Outbox Relay: Polls the transactional outbox table and publishes events to Kafka.
- * Guarantees at-least-once delivery. Kafka consumers must be idempotent.
+ * Guarantees at-least-once delivery. Failed messages are sent to DLQ.
  */
 export declare class OutboxRelay {
     private producer;
+    private dlq;
     private running;
     private pollInterval;
     private readonly batchSize;

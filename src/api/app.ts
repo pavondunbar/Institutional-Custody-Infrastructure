@@ -8,6 +8,7 @@ import { TokenService } from '../tokenization/token-service';
 import { ComplianceService } from '../tokenization/compliance-service';
 import { CorporateActionsService } from '../tokenization/corporate-actions-service';
 import { createInstitutionalRoutes } from './institutional-routes';
+import { createAuthRoutes } from './auth-routes';
 import { MetricsExporter } from '../monitoring/metrics-exporter';
 import { db } from '../database/connection';
 import { rateLimiter } from '../cache/redis';
@@ -702,6 +703,9 @@ export function createApp() {
 
   // ======================== INSTITUTIONAL CONTROLS ========================
   app.use('/api/v1/institutional', createInstitutionalRoutes());
+
+  // ======================== AUTH / IAM ========================
+  app.use('/api/v1/auth', createAuthRoutes());
 
   // Error handler
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

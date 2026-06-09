@@ -4,12 +4,14 @@ exports.OutboxRelay = void 0;
 const kafkajs_1 = require("kafkajs");
 const connection_1 = require("../database/connection");
 const config_1 = require("../config");
+const dlq_service_1 = require("./dlq-service");
 /**
  * Outbox Relay: Polls the transactional outbox table and publishes events to Kafka.
- * Guarantees at-least-once delivery. Kafka consumers must be idempotent.
+ * Guarantees at-least-once delivery. Failed messages are sent to DLQ.
  */
 class OutboxRelay {
     producer;
+    dlq;
     running = false;
     pollInterval = null;
     batchSize = 100;
@@ -20,9 +22,11 @@ class OutboxRelay {
             brokers: config_1.config.kafka.brokers,
         });
         this.producer = kafka.producer({ idempotent: true });
+        this.dlq = new dlq_service_1.DLQService();
     }
     async start() {
         await this.producer.connect();
+        await this.dlq.start();
         this.running = true;
         this.poll();
         config_1.logger.info('Outbox relay started');
@@ -32,6 +36,7 @@ class OutboxRelay {
         if (this.pollInterval)
             clearTimeout(this.pollInterval);
         await this.producer.disconnect();
+        await this.dlq.stop();
         config_1.logger.info('Outbox relay stopped');
     }
     poll() {
@@ -73,12 +78,26 @@ class OutboxRelay {
                     },
                 }],
         }));
-        // Publish to Kafka
-        await this.producer.sendBatch({ topicMessages: messages });
-        // Mark as published
-        const ids = result.rows.map(r => r.id);
-        await connection_1.db.query(`UPDATE outbox SET published = TRUE, published_at = NOW() WHERE id = ANY($1)`, [ids]);
-        config_1.logger.debug({ count: ids.length }, 'Outbox entries published to Kafka');
+        try {
+            // Publish to Kafka
+            await this.producer.sendBatch({ topicMessages: messages });
+            // Mark as published
+            const ids = result.rows.map(r => r.id);
+            await connection_1.db.query(`UPDATE outbox SET published = TRUE, published_at = NOW() WHERE id = ANY($1)`, [ids]);
+            config_1.logger.debug({ count: ids.length }, 'Outbox entries published to Kafka');
+        }
+        catch (err) {
+            // On batch failure, send each message individually to DLQ
+            for (const row of result.rows) {
+                const topic = `${row.aggregate_type}.events`;
+                const payload = JSON.stringify({ eventId: row.id, eventType: row.event_type, aggregateType: row.aggregate_type, aggregateId: row.aggregate_id, payload: row.payload, timestamp: row.created_at });
+                await this.dlq.sendToDLQ({ originalTopic: topic, key: row.aggregate_id, payload, error: err instanceof Error ? err : new Error(String(err)) });
+            }
+            // Mark as published to avoid infinite retry (DLQ handles retries)
+            const ids = result.rows.map(r => r.id);
+            await connection_1.db.query(`UPDATE outbox SET published = TRUE, published_at = NOW() WHERE id = ANY($1)`, [ids]);
+            config_1.logger.error({ count: result.rows.length }, 'Batch failed — messages sent to DLQ');
+        }
     }
 }
 exports.OutboxRelay = OutboxRelay;
